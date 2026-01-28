@@ -2643,13 +2643,94 @@ class ServiceRunner:
             'steps': []
         }
         
-        # Step 0: Create dataset if needed
+        # Step 0: Handle dataset creation/selection
+        # When dataset_id is empty, we always create a new dataset (since we don't specify it in the test)
+        # But first, check storage and existing datasets to determine if we need to download more images
+        
+        # Check actual files in storage
+        actual_files_on_disk = 0
+        if os.path.exists(self.storage_path):
+            actual_files_on_disk = len([f for f in os.listdir(self.storage_path) 
+                                       if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+        
+        logger.info(f"Storage check: {actual_files_on_disk} files found in {self.storage_path}")
+        
+        # Track if dataset_id was originally empty (before any creation)
+        original_dataset_id_empty = (dataset_id is None or dataset_id == '')
+        
+        # If dataset_id is empty, check if datasets exist in project and compare counts
+        need_new_dataset = False
+        dataset_has_items = False
+        items_count = 0
+        existing_dataset_id = None
+        
+        if create_dataset and original_dataset_id_empty:
+            # Dataset field is empty - check if datasets exist in project
+            if project_id:
+                try:
+                    project = dl.projects.get(project_id=project_id)
+                    datasets = list(project.datasets.list().all())
+                    
+                    if datasets:
+                        logger.info(f"Found {len(datasets)} existing dataset(s) in project")
+                        # Check each dataset to see if items count matches storage files count
+                        for ds in datasets:
+                            try:
+                                filters = dl.Filters(resource=dl.FiltersResource.ITEM)
+                                filters.add(field='hidden', values=False)
+                                filters.add(field='type', values='file')
+                                ds_items_count = ds.items.list(filters=filters).items_count
+                                
+                                logger.info(f"Dataset '{ds.name}' ({ds.id}) has {ds_items_count} items, storage has {actual_files_on_disk} files")
+                                
+                                if ds_items_count != actual_files_on_disk:
+                                    need_new_dataset = True
+                                    logger.info(f"⚠️  Dataset items count ({ds_items_count}) does not match storage files count ({actual_files_on_disk})")
+                                    logger.info(f"   → Will create a new dataset to ensure consistency")
+                                    break
+                                else:
+                                    # Items match, but we still need a new dataset since dataset_id is empty
+                                    # (user didn't specify which dataset to use)
+                                    need_new_dataset = True
+                                    logger.info(f"✓ Dataset items count matches storage, but dataset_id is empty")
+                                    logger.info(f"   → Will create a new dataset since no specific dataset was specified")
+                                    break
+                            except Exception as e:
+                                logger.warning(f"Could not check items in dataset {ds.id}: {e}")
+                                need_new_dataset = True
+                                break
+                    else:
+                        logger.info("No existing datasets found in project - will create new dataset")
+                        need_new_dataset = True
+                except Exception as e:
+                    logger.warning(f"Could not list datasets in project: {e}")
+                    need_new_dataset = True
+            else:
+                logger.info("No project_id provided - will create new dataset")
+                need_new_dataset = True
+        
+        # Track if we're creating a new dataset (will be used later)
+        was_newly_created = False
+        
+        # Create dataset if needed
         if create_dataset:
             if progress_callback:
                 progress_callback('create_dataset', 'running', 5, 'Creating/Getting dataset...')
             logger.info("=" * 60)
             logger.info("STEP 0: Creating/Getting dataset")
             logger.info("=" * 60)
+            
+            if need_new_dataset or original_dataset_id_empty:
+                was_newly_created = True
+                if need_new_dataset:
+                    logger.info("📝 Creating new dataset:")
+                    if actual_files_on_disk > 0:
+                        logger.info(f"   Reason: Dataset field is empty and existing datasets don't match storage")
+                        logger.info(f"   Storage has {actual_files_on_disk} files, will create fresh dataset")
+                    else:
+                        logger.info(f"   Reason: Dataset field is empty - creating new dataset for this test run")
+                else:
+                    logger.info("📝 Creating new dataset (dataset_id was empty)")
             
             dataset_result = self.create_dataset(
                 project_id=project_id, 
@@ -2682,9 +2763,8 @@ class ServiceRunner:
                 progress_callback('create_dataset', 'skipped', 5, f'Using existing dataset: {dataset_id}')
         
         # Check if dataset exists and has items - if so, skip download and link_items
-        dataset_has_items = False
-        items_count = 0
-        if dataset_id:
+        # BUT: if we just created a new dataset (because dataset_id was empty), it won't have items yet
+        if dataset_id and not was_newly_created:
             try:
                 dataset = dl.datasets.get(dataset_id=dataset_id)
                 # Check if dataset has items in /stress-test/ folder (any date)
@@ -2710,20 +2790,56 @@ class ServiceRunner:
             except Exception as e:
                 logger.warning(f"Could not check dataset items: {e}")
                 dataset_has_items = False
+        elif was_newly_created:
+            logger.info(f"Newly created dataset {dataset_id} - will proceed with download and link_items steps")
+            dataset_has_items = False  # New dataset won't have items yet
         
         filenames = []
         
         # Step 1: Download images
-        # Auto-skip if dataset has items (unless explicitly requested)
-        should_skip_download = skip_download or dataset_has_items
+        # When dataset_id was empty (and we created a new dataset), check if we need to download more images
+        # Compare max_images with actual_files_on_disk
+        need_more_downloads = False
+        images_to_download = max_images
+        
+        if was_newly_created:
+            # Dataset field was empty - check if we need more downloads
+            if max_images > actual_files_on_disk:
+                need_more_downloads = True
+                images_to_download = max_images - actual_files_on_disk
+                logger.info(f"📥 Download check: Max Images={max_images}, Storage has={actual_files_on_disk}")
+                logger.info(f"   → Need to download {images_to_download} more images to reach {max_images} total")
+            else:
+                logger.info(f"✓ Download check: Max Images={max_images}, Storage has={actual_files_on_disk}")
+                logger.info(f"   → Storage already has enough files (or more), no additional download needed")
+        
+        # Auto-skip if dataset has items (unless explicitly requested or we need more downloads)
+        should_skip_download = (skip_download or dataset_has_items) and not need_more_downloads
+        
         if not should_skip_download:
-            if progress_callback:
-                progress_callback('download_images', 'running', 15, f'Downloading {max_images} COCO images...')
-            logger.info("=" * 60)
-            logger.info(f"STEP 1: Downloading {max_images} COCO images")
-            logger.info("=" * 60)
+            if need_more_downloads:
+                # Download only the remaining needed images
+                if progress_callback:
+                    progress_callback('download_images', 'running', 15, f'Downloading {images_to_download} additional images (need {max_images} total, have {actual_files_on_disk})...')
+                logger.info("=" * 60)
+                logger.info(f"STEP 1: Downloading {images_to_download} additional COCO images")
+                logger.info(f"        (Target: {max_images} total, Currently: {actual_files_on_disk} in storage)")
+                logger.info("=" * 60)
+                
+                # Download the remaining images
+                # Note: download_images will download up to max_images, but we already have actual_files_on_disk
+                # So we need to download max_images total, and it will skip existing files
+                download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
+            else:
+                # Normal download
+                if progress_callback:
+                    progress_callback('download_images', 'running', 15, f'Downloading {max_images} COCO images...')
+                logger.info("=" * 60)
+                logger.info(f"STEP 1: Downloading {max_images} COCO images")
+                logger.info("=" * 60)
+                
+                download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
             
-            download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
             results['steps'].append({
                 'step': 'download_images',
                 'result': download_result
@@ -2734,8 +2850,14 @@ class ServiceRunner:
         else:
             # Get existing files
             if os.path.exists(self.storage_path):
-                filenames = [f for f in os.listdir(self.storage_path) 
+                all_filenames = [f for f in os.listdir(self.storage_path) 
                             if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+                # Limit to max_images if we have more than needed
+                filenames = all_filenames[:max_images] if len(all_filenames) > max_images else all_filenames
+                if len(all_filenames) > max_images:
+                    logger.info(f"Limiting to {max_images} files from {len(all_filenames)} available in storage")
+            else:
+                filenames = []
             skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
             results['steps'].append({'step': 'download_images', 'skipped': True, 'reason': skip_reason, 'existing_files': len(filenames), 'dataset_items': items_count})
             if progress_callback:
