@@ -1346,17 +1346,37 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info(f"Using provided project: {project.name} (ID: {project_id})")
         
         # Check if dataset already exists
+        # Note: We only reuse existing datasets if explicitly requested (when dataset_id was provided)
+        # When creating a new dataset (dataset_id was empty), we always create fresh
         try:
             existing_dataset = project.datasets.get(dataset_name=dataset_name)
             logger.info(f"Dataset already exists: {existing_dataset.id}")
-            return {
-                'dataset_id': existing_dataset.id,
-                'dataset_name': existing_dataset.name,
-                'project_id': project_id,
-                'driver_id': driver_id,
-                'created': False,
-                'message': 'Dataset already exists'
-            }
+            # Check if dataset is empty - if not, we should create a new one with unique name
+            try:
+                filters = dl.Filters(resource=dl.FiltersResource.ITEM)
+                filters.add(field='hidden', values=False)
+                filters.add(field='type', values='file')
+                existing_items_count = existing_dataset.items.list(filters=filters).items_count
+                if existing_items_count > 0:
+                    # Dataset has items, create a new one with unique name instead
+                    logger.info(f"Existing dataset has {existing_items_count} items - creating new dataset with unique name")
+                    import time as time_module
+                    unique_suffix = time_module.strftime('%Y%m%d-%H%M%S')
+                    dataset_name = f"{dataset_name}-{unique_suffix}"
+                    logger.info(f"Using unique dataset name: {dataset_name}")
+                else:
+                    # Dataset is empty, can reuse it
+                    logger.info(f"Existing dataset is empty - reusing it")
+                    return {
+                        'dataset_id': existing_dataset.id,
+                        'dataset_name': existing_dataset.name,
+                        'project_id': project_id,
+                        'driver_id': driver_id,
+                        'created': False,
+                        'message': 'Dataset already exists (empty)'
+                    }
+            except Exception as check_error:
+                logger.warning(f"Could not check dataset items: {check_error}, will create new dataset")
         except dl.exceptions.NotFound:
             logger.info(f"Dataset does not exist, creating: {dataset_name}")
         
@@ -3083,9 +3103,22 @@ class ServiceRunner:
                 else:
                     logger.info("📝 Creating new dataset (dataset_id was empty)")
             
+            # When creating a new dataset (because dataset_id was empty), use a unique name to avoid reusing old datasets
+            if need_new_dataset or original_dataset_id_empty:
+                # Add timestamp to ensure unique dataset name
+                import time as time_module
+                unique_suffix = time_module.strftime('%Y%m%d-%H%M%S')
+                if dataset_name:
+                    unique_dataset_name = f"{dataset_name}-{unique_suffix}"
+                else:
+                    unique_dataset_name = f'stress-test-dataset-{self.date_str}-{unique_suffix}'
+                logger.info(f"Using unique dataset name: {unique_dataset_name} (to avoid reusing existing datasets)")
+            else:
+                unique_dataset_name = dataset_name
+            
             dataset_result = self.create_dataset(
                 project_id=project_id, 
-                dataset_name=dataset_name,
+                dataset_name=unique_dataset_name,
                 driver_id=driver_id
             )
             results['steps'].append({
