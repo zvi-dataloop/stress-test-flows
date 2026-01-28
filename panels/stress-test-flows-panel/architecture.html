@@ -35,7 +35,7 @@
         .arch-box .label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
         .arch-box.nginx { border-color: var(--accent-success); background: rgba(16, 185, 129, 0.05); }
         .arch-box.serve { border-color: var(--accent-primary); background: rgba(14, 165, 233, 0.05); }
-        .arch-box.sam2 { border-color: var(--accent-secondary); background: rgba(99, 102, 241, 0.05); }
+        .arch-box.resnet { border-color: var(--accent-secondary); background: rgba(99, 102, 241, 0.05); }
         .arch-box.storage { border-color: var(--accent-warning); background: rgba(245, 158, 11, 0.05); }
         .arch-arrow { font-size: 20px; color: var(--accent-primary); }
         .arch-arrow.down { display: block; text-align: center; margin: 12px 0; }
@@ -91,7 +91,7 @@
                 <div class="arch-layer">
                     <div class="layer-label">Compute & Storage</div>
                     <div class="layer-content">
-                        <div class="arch-box sam2"><div class="icon">🤖</div><div class="label">SAM2 Function</div></div>
+                        <div class="arch-box resnet"><div class="icon">🤖</div><div class="label">ResNet Function</div></div>
                         <div class="arch-box storage"><div class="icon">📁</div><div class="label">GCP Filestore</div></div>
                         <div class="arch-box"><div class="icon">🔗</div><div class="label">faasProxy Dataset</div></div>
                     </div>
@@ -121,11 +121,11 @@
                     </div>
                 </div>
                 <div class="component-card">
-                    <h3>🤖 SAM2 Function</h3>
-                    <p>Segment Anything Model 2 for image segmentation.</p>
+                    <h3>🤖 ResNet Function</h3>
+                    <p>ResNet model for image classification.</p>
                     <div class="specs">
                         <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">ML Function</span></div>
-                        <div class="spec-row"><span class="spec-label">GPU</span><span class="spec-value">Required</span></div>
+                        <div class="spec-row"><span class="spec-label">GPU</span><span class="spec-value">Optional</span></div>
                         <div class="spec-row"><span class="spec-label">Input</span><span class="spec-value">Image Item</span></div>
                     </div>
                 </div>

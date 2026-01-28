@@ -90,82 +90,15 @@
         </div>
 
         <div class="card">
-            <h2>Select Public Dataset</h2>
-            <div class="dataset-grid">
-                <div class="dataset-option selected">
-                    <div class="dataset-icon">🎯</div>
-                    <div class="dataset-name">COCO val2017</div>
-                    <div class="dataset-size">5K images • 1GB</div>
-                </div>
-                <div class="dataset-option">
-                    <div class="dataset-icon">🏷️</div>
-                    <div class="dataset-name">ImageNet Subset</div>
-                    <div class="dataset-size">50K images • 6GB</div>
-                </div>
-                <div class="dataset-option">
-                    <div class="dataset-icon">📷</div>
-                    <div class="dataset-name">Open Images</div>
-                    <div class="dataset-size">10K images • 2GB</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>Download Script</h2>
+            <h2>COCO Dataset</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Use this script/app to download images directly to the Filestore mount path.
+                Images are downloaded from the COCO dataset directly to the Filestore mount path using the stress-test application.
             </p>
-            <div class="code-block large">import os
-import requests
-from zipfile import ZipFile
-from tqdm import tqdm
-
-# Configuration
-DATASET_URL = "http://images.cocodataset.org/zips/val2017.zip"
-FILESTORE_PATH = "/mnt/filestore/stress-test-images"
-TEMP_ZIP = "/tmp/val2017.zip"
-
-def download_file(url, dest):
-    """Download file with progress bar"""
-    response = requests.get(url, stream=True)
-    total = int(response.headers.get('content-length', 0))
-    
-    with open(dest, 'wb') as f, tqdm(
-        total=total, unit='iB', unit_scale=True
-    ) as pbar:
-        for data in response.iter_content(chunk_size=1024):
-            size = f.write(data)
-            pbar.update(size)
-
-def main():
-    # Create destination directory
-    os.makedirs(FILESTORE_PATH, exist_ok=True)
-    
-    print(f"Downloading dataset from {DATASET_URL}")
-    download_file(DATASET_URL, TEMP_ZIP)
-    
-    print(f"Extracting to {FILESTORE_PATH}")
-    with ZipFile(TEMP_ZIP, 'r') as zip_ref:
-        zip_ref.extractall(FILESTORE_PATH)
-    
-    # Cleanup
-    os.remove(TEMP_ZIP)
-    
-    # List downloaded files
-    images = os.listdir(os.path.join(FILESTORE_PATH, 'val2017'))
-    print(f"Downloaded {len(images)} images")
-
-if __name__ == "__main__":
-    main()</div>
-        </div>
-
-        <div class="card">
-            <h2>Verify Download</h2>
-            <div class="code-block"># Check files in Filestore
-ls -la /mnt/filestore/stress-test-images/val2017/ | head -20
-
-# Count total images
-find /mnt/filestore/stress-test-images/val2017/ -name "*.jpg" | wc -l</div>
+            <div style="background: var(--bg-tertiary); border-radius: 12px; padding: 20px; text-align: center;">
+                <div style="font-size: 28px; margin-bottom: 8px;">🎯</div>
+                <div style="font-size: 15px; font-weight: 600; margin-bottom: 4px;">COCO Dataset</div>
+                <div style="font-size: 11px; color: var(--accent-warning); font-family: 'JetBrains Mono', monospace;">Up to 123K images available</div>
+            </div>
         </div>
 
         <div class="nav-buttons">

@@ -2227,7 +2227,11 @@ class ServiceRunner:
             logger.info(f"[Poll Batch] Initial progress update sent")
         
         poll_count = 0
+        consecutive_no_stats_count = 0  # Track consecutive polls without statistics
+        max_no_stats_retries = 12  # Allow up to 12 consecutive polls (1 minute) without stats before giving up
         logger.info(f"[Poll Batch] Starting polling loop (max_time={max_poll_time}s, interval={poll_interval}s)")
+        logger.info(f"[Poll Batch] Will wait up to {max_no_stats_retries * poll_interval}s for statistics to become available")
+        
         while time_module.time() - start_time < max_poll_time:
             poll_count += 1
             elapsed_sec = int(time_module.time() - start_time)
@@ -2243,46 +2247,77 @@ class ServiceRunner:
                 headers = {'Authorization': f'Bearer {dl.token()}'}
                 base_url = dl.environment()
                 
+                pipeline_stats = None
+                pipeline_not_found = False
+                
                 try:
                     # Get pipeline statistics with execution counters
                     stats_response = requests.get(
                         f"{base_url}/pipelines/{pipeline_id}/statistics",
-                        headers=headers
+                        headers=headers,
+                        timeout=30  # 30 second timeout for the request
                     )
-                    pipeline_stats = None
+                    
                     if stats_response.status_code == 200:
                         pipeline_stats = stats_response.json()
+                        consecutive_no_stats_count = 0  # Reset counter when stats are available
+                        logger.info(f"[Poll Batch] ✓ Statistics available (poll #{poll_count})")
                     elif stats_response.status_code == 404:
                         # Check if it's pipeline not found or just no statistics yet
                         error_text = stats_response.text.lower()
                         if 'pipeline not found' in error_text or ('not found' in error_text and 'statistics' not in error_text):
                             logger.error(f"[Poll Batch] Pipeline {pipeline_id} not found (404) - pipeline may have been deleted")
-                            if progress_callback:
-                                try:
-                                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
-                                except:
-                                    pass
-                            # Break out of polling loop - can't continue without pipeline
-                            break
+                            pipeline_not_found = True
                         else:
-                            # No statistics yet, pipeline might not have started
-                            logger.debug(f"No pipeline statistics found yet for {pipeline_id}")
+                            # No statistics yet, pipeline might not have started - wait and retry
+                            consecutive_no_stats_count += 1
+                            logger.info(f"[Poll Batch] No statistics yet (poll #{poll_count}, consecutive: {consecutive_no_stats_count}/{max_no_stats_retries})")
+                            logger.info(f"[Poll Batch] Pipeline may still be starting - will wait and retry...")
+                            
+                            # If we've waited long enough without stats, check if pipeline exists
+                            if consecutive_no_stats_count >= max_no_stats_retries:
+                                logger.warning(f"[Poll Batch] No statistics after {max_no_stats_retries} polls - checking if pipeline exists...")
+                                # Try to verify pipeline exists before giving up
+                                try:
+                                    pipeline_check = requests.get(
+                                        f"{base_url}/pipelines/{pipeline_id}",
+                                        headers=headers,
+                                        timeout=10
+                                    )
+                                    if pipeline_check.status_code == 404:
+                                        logger.error(f"[Poll Batch] Pipeline {pipeline_id} does not exist - breaking")
+                                        pipeline_not_found = True
+                                    else:
+                                        logger.info(f"[Poll Batch] Pipeline exists - statistics may take longer, continuing to wait...")
+                                        consecutive_no_stats_count = 0  # Reset and continue waiting
+                                except Exception as check_error:
+                                    logger.warning(f"[Poll Batch] Could not verify pipeline existence: {check_error} - continuing to wait")
+                                    consecutive_no_stats_count = 0  # Reset and continue
                     else:
                         logger.warning(f"Failed to get pipeline statistics: {stats_response.status_code} - {stats_response.text[:200]}")
+                        consecutive_no_stats_count += 1
+                except requests.exceptions.Timeout:
+                    logger.warning(f"[Poll Batch] Request timeout while fetching statistics (poll #{poll_count}) - will retry")
+                    consecutive_no_stats_count += 1
+                    pipeline_stats = None
                 except Exception as stats_error:
                     error_msg = str(stats_error)
-                    if '404' in error_msg or 'not found' in error_msg.lower():
+                    if '404' in error_msg or ('not found' in error_msg.lower() and 'pipeline' in error_msg.lower()):
                         logger.error(f"[Poll Batch] Pipeline {pipeline_id} not found - pipeline may have been deleted")
-                        if progress_callback:
-                            try:
-                                progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found', error=f'Pipeline not found: {pipeline_id}')
-                            except:
-                                pass
-                        # Break out of polling loop
-                        break
+                        pipeline_not_found = True
                     else:
-                        logger.debug(f"Could not get pipeline statistics via API: {stats_error}")
+                        logger.debug(f"Could not get pipeline statistics via API: {stats_error} - will retry")
+                        consecutive_no_stats_count += 1
                     pipeline_stats = None
+                
+                # Break if pipeline not found
+                if pipeline_not_found:
+                    if progress_callback:
+                        try:
+                            progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
+                        except:
+                            pass
+                    break
                 
                 # Calculate elapsed time (always calculate, even if stats not available)
                 elapsed = time_module.time() - start_time
@@ -2410,6 +2445,11 @@ class ServiceRunner:
             logger.info(f"[Poll Pipeline State] Initial progress update sent")
         
         poll_count = 0
+        consecutive_no_stats_count = 0  # Track consecutive polls without statistics
+        max_no_stats_retries = 12  # Allow up to 12 consecutive polls (1 minute) without stats before giving up
+        logger.info(f"[Poll Pipeline State] Starting polling loop (max_time={max_poll_time}s, interval={poll_interval}s)")
+        logger.info(f"[Poll Pipeline State] Will wait up to {max_no_stats_retries * poll_interval}s for statistics to become available")
+        
         while time_module.time() - start_time < max_poll_time:
             poll_count += 1
             logger.info(f"[Poll Pipeline State] Poll iteration #{poll_count} (elapsed: {int((time_module.time() - start_time) // 60)}m {int((time_module.time() - start_time) % 60)}s)")
@@ -2419,46 +2459,77 @@ class ServiceRunner:
                 headers = {'Authorization': f'Bearer {dl.token()}'}
                 base_url = dl.environment()
                 
+                pipeline_stats = None
+                pipeline_not_found = False
+                
                 try:
                     # Get pipeline statistics with execution counters
                     stats_response = requests.get(
                         f"{base_url}/pipelines/{pipeline_id}/statistics",
-                        headers=headers
+                        headers=headers,
+                        timeout=30  # 30 second timeout for the request
                     )
-                    pipeline_stats = None
+                    
                     if stats_response.status_code == 200:
                         pipeline_stats = stats_response.json()
+                        consecutive_no_stats_count = 0  # Reset counter when stats are available
+                        logger.info(f"[Poll Pipeline State] ✓ Statistics available (poll #{poll_count})")
                     elif stats_response.status_code == 404:
                         # Check if it's pipeline not found or just no statistics yet
                         error_text = stats_response.text.lower()
                         if 'pipeline not found' in error_text or ('not found' in error_text and 'statistics' not in error_text):
                             logger.error(f"[Poll Pipeline State] Pipeline {pipeline_id} not found (404) - pipeline may have been deleted")
-                            if progress_callback:
-                                try:
-                                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
-                                except:
-                                    pass
-                            # Break out of polling loop - can't continue without pipeline
-                            break
+                            pipeline_not_found = True
                         else:
-                            # No statistics yet, pipeline might not have started
-                            logger.debug(f"No pipeline statistics found yet for {pipeline_id}")
+                            # No statistics yet, pipeline might not have started - wait and retry
+                            consecutive_no_stats_count += 1
+                            logger.info(f"[Poll Pipeline State] No statistics yet (poll #{poll_count}, consecutive: {consecutive_no_stats_count}/{max_no_stats_retries})")
+                            logger.info(f"[Poll Pipeline State] Pipeline may still be starting - will wait and retry...")
+                            
+                            # If we've waited long enough without stats, check if pipeline exists
+                            if consecutive_no_stats_count >= max_no_stats_retries:
+                                logger.warning(f"[Poll Pipeline State] No statistics after {max_no_stats_retries} polls - checking if pipeline exists...")
+                                # Try to verify pipeline exists before giving up
+                                try:
+                                    pipeline_check = requests.get(
+                                        f"{base_url}/pipelines/{pipeline_id}",
+                                        headers=headers,
+                                        timeout=10
+                                    )
+                                    if pipeline_check.status_code == 404:
+                                        logger.error(f"[Poll Pipeline State] Pipeline {pipeline_id} does not exist - breaking")
+                                        pipeline_not_found = True
+                                    else:
+                                        logger.info(f"[Poll Pipeline State] Pipeline exists - statistics may take longer, continuing to wait...")
+                                        consecutive_no_stats_count = 0  # Reset and continue waiting
+                                except Exception as check_error:
+                                    logger.warning(f"[Poll Pipeline State] Could not verify pipeline existence: {check_error} - continuing to wait")
+                                    consecutive_no_stats_count = 0  # Reset and continue
                     else:
                         logger.warning(f"Failed to get pipeline statistics: {stats_response.status_code} - {stats_response.text[:200]}")
+                        consecutive_no_stats_count += 1
+                except requests.exceptions.Timeout:
+                    logger.warning(f"[Poll Pipeline State] Request timeout while fetching statistics (poll #{poll_count}) - will retry")
+                    consecutive_no_stats_count += 1
+                    pipeline_stats = None
                 except Exception as stats_error:
                     error_msg = str(stats_error)
-                    if '404' in error_msg or 'not found' in error_msg.lower():
+                    if '404' in error_msg or ('not found' in error_msg.lower() and 'pipeline' in error_msg.lower()):
                         logger.error(f"[Poll Pipeline State] Pipeline {pipeline_id} not found - pipeline may have been deleted")
-                        if progress_callback:
-                            try:
-                                progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found', error=f'Pipeline not found: {pipeline_id}')
-                            except:
-                                pass
-                        # Break out of polling loop
-                        break
+                        pipeline_not_found = True
                     else:
-                        logger.debug(f"Could not get pipeline statistics via API: {stats_error}")
+                        logger.debug(f"Could not get pipeline statistics via API: {stats_error} - will retry")
+                        consecutive_no_stats_count += 1
                     pipeline_stats = None
+                
+                # Break if pipeline not found
+                if pipeline_not_found:
+                    if progress_callback:
+                        try:
+                            progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
+                        except:
+                            pass
+                    break
                 
                 # Calculate elapsed time (always calculate, even if stats not available)
                 elapsed = time_module.time() - start_time

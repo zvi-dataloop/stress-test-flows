@@ -91,85 +91,10 @@
         </div>
 
         <div class="card">
-            <h2>Create Link Items Script</h2>
-            <div class="code-block large">import os
-import dtlpy as dl
-from concurrent.futures import ThreadPoolExecutor
-from tqdm import tqdm
-
-# Configuration
-PROJECT_NAME = 'nginx-stress-test'
-DATASET_NAME = 'benchmark-images'
-FILESTORE_PATH = '/mnt/filestore/stress-test-images/val2017'
-FAAS_PROXY_BASE_URL = 'https://dev-env-2.dataloop.ai/storage'
-
-def create_link_item(dataset, image_path, remote_path):
-    """Create a link item for an image"""
-    try:
-        # Build the faasProxy URL for the image
-        link_url = f"{FAAS_PROXY_BASE_URL}/{remote_path}"
-        
-        # Create the link item
-        item = dataset.items.upload(
-            local_path=link_url,
-            remote_path='/images',
-            item_metadata={'source': 'stress-test'}
-        )
-        return item
-    except Exception as e:
-        print(f"Error creating link for {image_path}: {e}")
-        return None
-
-def main():
-    # Login and get dataset
-    dl.login()
-    project = dl.projects.get(project_name=PROJECT_NAME)
-    dataset = project.datasets.get(dataset_name=DATASET_NAME)
-    
-    print(f"Project: {project.name}")
-    print(f"Dataset: {dataset.name}")
-    
-    # Get all images from Filestore
-    images = [f for f in os.listdir(FILESTORE_PATH) 
-              if f.endswith(('.jpg', '.jpeg', '.png'))]
-    
-    print(f"Found {len(images)} images to link")
-    
-    # Create link items
-    created = 0
-    for image_name in tqdm(images, desc="Creating link items"):
-        image_path = os.path.join(FILESTORE_PATH, image_name)
-        remote_path = f"stress-test-images/val2017/{image_name}"
-        
-        item = create_link_item(dataset, image_path, remote_path)
-        if item:
-            created += 1
-    
-    print(f"\nCreated {created} link items")
-    print(f"Dataset item count: {dataset.items_count}")
-
-if __name__ == "__main__":
-    main()</div>
-        </div>
-
-        <div class="card">
-            <h2>Verify Link Items</h2>
-            <div class="code-block">import dtlpy as dl
-
-dl.login()
-project = dl.projects.get(project_name='nginx-stress-test')
-dataset = project.datasets.get(dataset_name='benchmark-images')
-
-# Get item count
-print(f"Total items in dataset: {dataset.items_count}")
-
-# List first 10 items
-filters = dl.Filters()
-filters.page_size = 10
-pages = dataset.items.list(filters=filters)
-
-for item in pages.items:
-    print(f"  - {item.name} ({item.type})")</div>
+            <h2>Create Link Items</h2>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                Link items are created automatically by the stress-test application when you run the full workflow. Each image downloaded to Filestore will have a corresponding link item created in the faasProxy dataset.
+            </p>
         </div>
 
         <div class="nav-buttons">

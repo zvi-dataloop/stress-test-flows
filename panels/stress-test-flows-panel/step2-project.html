@@ -74,97 +74,62 @@
 
         <div class="card">
             <h2>Create Project</h2>
-            <div class="step-list">
-                <div class="step-item">
-                    <div class="step-num">1</div>
-                    <div class="step-content">
-                        <h3>Login to Dataloop</h3>
-                        <div class="code-block">import dtlpy as dl
-
-dl.login()</div>
-                    </div>
-                </div>
-                <div class="step-item">
-                    <div class="step-num">2</div>
-                    <div class="step-content">
-                        <h3>Create Project in Organization</h3>
-                        <div class="code-block"># Get the organization
-org = dl.organizations.get(organization_id='YOUR_ORG_ID')
-
-# Create a new project for stress testing
-project = dl.projects.create(
-    project_name='nginx-stress-test',
-    org_id=org.id
-)
-
-print(f"Project created: {project.name} ({project.id})")</div>
-                    </div>
-                </div>
-            </div>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                Create a project in your organization for stress testing. The project will contain datasets and pipelines.
+            </p>
         </div>
 
         <div class="card">
             <h2>Create faasProxy Dataset</h2>
-            <div class="step-list">
-                <div class="step-item">
-                    <div class="step-num">3</div>
-                    <div class="step-content">
-                        <h3>Create Dataset with faasProxy Driver</h3>
-                        <div class="code-block"># Create the dataset for storing link items
-dataset = project.datasets.create(
-    dataset_name='benchmark-images',
-    driver='faasProxy'  # Use faasProxy storage driver
-)
-
-print(f"Dataset created: {dataset.name} ({dataset.id})")</div>
-                        <div class="info-box">
-                            <p><strong>faasProxy Driver:</strong> This driver allows the dataset to reference files stored in the FaaS Filestore without copying them, using link items.</p>
-                        </div>
-                    </div>
-                </div>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                Create a dataset with the faasProxy storage driver. This driver allows the dataset to reference files stored in the FaaS Filestore without copying them, using link items.
+            </p>
+            <div class="info-box">
+                <p><strong>Retrieving Storage Driver ID:</strong> To get the storage driver ID for faasProxy type in your organization, use the following approach:</p>
             </div>
-        </div>
-
-        <div class="card">
-            <h2>Complete Script</h2>
             <div class="code-block large">import dtlpy as dl
-
-# Configuration
-ORG_ID = 'YOUR_ORG_ID'
-PROJECT_NAME = 'nginx-stress-test'
-DATASET_NAME = 'benchmark-images'
+import requests
 
 # Login
 dl.login()
 
-# Get organization
-org = dl.organizations.get(organization_id=ORG_ID)
-print(f"Organization: {org.name}")
+# Get your organization
+org = dl.organizations.get(organization_id='YOUR_ORG_ID')
 
-# Create project
-try:
-    project = dl.projects.get(project_name=PROJECT_NAME)
-    print(f"Project exists: {project.name}")
-except dl.exceptions.NotFound:
-    project = dl.projects.create(
-        project_name=PROJECT_NAME,
-        org_id=org.id
-    )
-    print(f"Project created: {project.name}")
+# Get storage drivers for the organization
+headers = {'Authorization': f'Bearer {dl.token()}'}
+base_url = dl.environment()
 
-# Create dataset with faasProxy driver
-try:
-    dataset = project.datasets.get(dataset_name=DATASET_NAME)
-    print(f"Dataset exists: {dataset.name}")
-except dl.exceptions.NotFound:
-    dataset = project.datasets.create(
-        dataset_name=DATASET_NAME,
-        driver='faasProxy'
-    )
-    print(f"Dataset created: {dataset.name}")
+# List storage drivers
+response = requests.get(
+    f"{base_url}/organizations/{org.id}/storage-drivers",
+    headers=headers
+)
 
-print(f"\nProject ID: {project.id}")
-print(f"Dataset ID: {dataset.id}")</div>
+if response.status_code == 200:
+    drivers = response.json()
+    
+    # Find faasProxy driver
+    faas_proxy_driver = None
+    for driver in drivers:
+        if driver.get('type') == 'faasProxy' or driver.get('driverType') == 'faasProxy':
+            faas_proxy_driver = driver
+            break
+    
+    if faas_proxy_driver:
+        driver_id = faas_proxy_driver.get('id') or faas_proxy_driver.get('driverId')
+        print(f"Found faasProxy driver ID: {driver_id}")
+        print(f"Driver details: {faas_proxy_driver}")
+    else:
+        print("faasProxy driver not found in organization")
+else:
+    print(f"Failed to get storage drivers: {response.status_code} - {response.text}")
+
+# Use the driver_id when creating dataset
+# dataset = project.datasets.create(
+#     dataset_name='benchmark-images',
+#     driver_id=driver_id  # Use the retrieved driver ID
+# )</div>
         </div>
 
         <div class="nav-buttons">

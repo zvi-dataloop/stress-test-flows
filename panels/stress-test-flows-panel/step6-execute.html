@@ -215,33 +215,6 @@
                 <strong>How it works:</strong> Piper creates a GenerateExecutionsCmd that fetches items in batches and triggers pipeline cycles for each item.
             </div>
 
-            <h3>Python SDK (Simplest)</h3>
-            <div class="code-block">import dtlpy as dl
-
-dl.setenv('env2')  # Use dev-env 2
-dl.login()
-
-# Get resources
-project = dl.projects.get(project_id='&lt;PROJECT_ID&gt;')
-dataset = project.datasets.get(dataset_name='benchmark-images')
-pipeline = project.pipelines.get(pipeline_name='stress-test-sam2-pipeline')
-
-print(f"Dataset: {dataset.name} ({dataset.items_count} items)")
-print(f"Pipeline: {pipeline.name}")
-
-# Execute batch on entire dataset - this triggers all items!
-filters = dl.Filters(resource=dl.FiltersResource.ITEM)
-filters.add(field='hidden', values=False)
-filters.add(field='type', values='file')
-
-# This creates a command that processes all items in batches
-execution = pipeline.execute_batch(
-    filters=filters,
-    dataset_ids=[dataset.id]
-)
-
-print(f"Batch execution started!")
-print(f"Command ID: {execution.id}")</div>
         </div>
 
         <div class="card">

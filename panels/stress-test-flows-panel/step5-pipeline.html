@@ -36,18 +36,18 @@
         .pipeline-row { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; }
         .pipeline-node { background: var(--bg-card); border: 2px solid var(--border-color); border-radius: 12px; padding: 16px 20px; text-align: center; min-width: 120px; transition: all 0.2s; }
         .pipeline-node:hover { border-color: var(--accent-secondary); transform: translateY(-2px); }
-        .pipeline-node.sam2 { border-color: var(--accent-secondary); background: rgba(99, 102, 241, 0.05); }
+        .pipeline-node.resnet { border-color: var(--accent-secondary); background: rgba(99, 102, 241, 0.05); }
         .pipeline-node .icon { font-size: 24px; margin-bottom: 6px; }
         .pipeline-node .label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
         .pipeline-node .type { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
         .pipeline-arrow { font-size: 20px; color: var(--accent-secondary); }
 
-        .sam2-section { background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.05)); border: 1px solid var(--accent-secondary); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
-        .sam2-section h3 { font-size: 16px; color: var(--accent-secondary); margin-bottom: 16px; }
-        .sam2-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-        .sam2-item { background: var(--bg-card); border-radius: 10px; padding: 14px; text-align: center; }
-        .sam2-item .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
-        .sam2-item .value { font-size: 13px; font-weight: 600; }
+        .resnet-section { background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(139, 92, 246, 0.05)); border: 1px solid var(--accent-secondary); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
+        .resnet-section h3 { font-size: 16px; color: var(--accent-secondary); margin-bottom: 16px; }
+        .resnet-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+        .resnet-item { background: var(--bg-card); border-radius: 10px; padding: 14px; text-align: center; }
+        .resnet-item .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+        .resnet-item .value { font-size: 13px; font-weight: 600; }
 
         .code-block { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-primary); overflow-x: auto; white-space: pre; }
         .code-block.large { padding: 20px; }
@@ -71,7 +71,7 @@
             <div class="step-badge">5</div>
             <div class="page-title">
                 <h1>Create Pipeline</h1>
-                <p>Create stress-test pipeline with SAM2 function</p>
+                <p>Create stress-test pipeline with ResNet function</p>
             </div>
         </div>
         <nav class="flow-nav">
@@ -94,9 +94,9 @@
                         <div class="type">Input Node</div>
                     </div>
                     <span class="pipeline-arrow">→</span>
-                    <div class="pipeline-node sam2">
+                    <div class="pipeline-node resnet">
                         <div class="icon">🤖</div>
-                        <div class="label">SAM2 Segment</div>
+                        <div class="label">ResNet Classify</div>
                         <div class="type">ML Function</div>
                     </div>
                     <span class="pipeline-arrow">→</span>
@@ -109,71 +109,15 @@
             </div>
         </div>
 
-        <div class="sam2-section">
-            <h3>SAM2 Function Details (Requires Or [ML Team] Input)</h3>
-            <div class="sam2-grid">
-                <div class="sam2-item"><div class="label">DPK Name</div><div class="value">TBD</div></div>
-                <div class="sam2-item"><div class="label">Function</div><div class="value">segment</div></div>
-                <div class="sam2-item"><div class="label">Input</div><div class="value">Image Item</div></div>
-                <div class="sam2-item"><div class="label">Output</div><div class="value">Annotations</div></div>
-                <div class="sam2-item"><div class="label">GPU</div><div class="value">Required</div></div>
+        <div class="resnet-section">
+            <h3>ResNet Function Details</h3>
+            <div class="resnet-grid">
+                <div class="resnet-item"><div class="label">DPK Name</div><div class="value">resnet-dpk</div></div>
+                <div class="resnet-item"><div class="label">Function</div><div class="value">classify</div></div>
+                <div class="resnet-item"><div class="label">Input</div><div class="value">Image Item</div></div>
+                <div class="resnet-item"><div class="label">Output</div><div class="value">Predictions</div></div>
+                <div class="resnet-item"><div class="label">GPU</div><div class="value">Optional</div></div>
             </div>
-        </div>
-
-        <div class="card">
-            <h2>Create Pipeline Script</h2>
-            <div class="code-block large">import dtlpy as dl
-
-# Configuration
-PROJECT_NAME = 'nginx-stress-test'
-DATASET_NAME = 'benchmark-images'
-PIPELINE_NAME = 'stress-test-sam2-pipeline'
-
-# Login
-dl.login()
-project = dl.projects.get(project_name=PROJECT_NAME)
-dataset = project.datasets.get(dataset_name=DATASET_NAME)
-
-# Create pipeline
-pipeline = project.pipelines.create(name=PIPELINE_NAME)
-
-# Add dataset node (trigger)
-dataset_node = pipeline.nodes.add(
-    node_type=dl.DatasetNode,
-    name='Input Images',
-    dataset_id=dataset.id
-)
-
-# Add SAM2 function node (TBD - get details from Or)
-# sam2_node = pipeline.nodes.add(
-#     node_type=dl.FunctionNode,
-#     name='SAM2 Segmentation',
-#     package_name='sam2-dpk',
-#     module_name='main',
-#     function_name='segment'
-# )
-
-# Connect nodes
-# pipeline.connections.add(
-#     source=dataset_node,
-#     target=sam2_node
-# )
-
-# Install and start pipeline
-pipeline.install()
-pipeline = pipeline.open_in_web()
-
-print(f"Pipeline created: {pipeline.name} ({pipeline.id})")</div>
-        </div>
-
-        <div class="decision-box">
-            <h3>Questions for Or (ML Team)</h3>
-            <ul>
-                <li>Which SAM2 DPK/application should we use?</li>
-                <li>What are the exact input/output specifications?</li>
-                <li>GPU requirements for SAM2?</li>
-                <li>Single-image or batch processing?</li>
-            </ul>
         </div>
 
         <div class="nav-buttons">
