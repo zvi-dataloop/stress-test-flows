@@ -2276,101 +2276,14 @@ class ServiceRunner:
         max_install_retries = 3
         install_success = False
         for retry in range(max_install_retries):
+            install_exception = None
             try:
                 pipeline.install()
                 # Refresh pipeline to get latest status
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 
-                # Check if installation failed
-                if pipeline.status == "Failure":
-                    logger.warning(f"Pipeline installation failed with status: {pipeline.status}")
-                    # Fetch composition to get error details
-                    try:
-                        composition = pipeline.composition
-                        error_message = None
-                        
-                        # Try to get error from composition
-                        if hasattr(composition, 'errorText') and composition.errorText:
-                            if isinstance(composition.errorText, dict):
-                                error_message = composition.errorText.get('message', '')
-                            else:
-                                error_message = str(composition.errorText)
-                        elif hasattr(composition, 'error') and composition.error:
-                            if isinstance(composition.error, dict):
-                                error_message = composition.error.get('message', '')
-                            else:
-                                error_message = str(composition.error)
-                        
-                        logger.info(f"Pipeline composition error: {error_message}")
-                        
-                        # Check if error is about stream-image package already existing
-                        if error_message and 'Package with the name stream-image already exist' in error_message:
-                            logger.warning("Package name conflict detected - updating code node to use unique package name")
-                            
-                            # Generate unique package name
-                            import time as time_module
-                            unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
-                            new_package_name = f"stream-image-{unique_suffix}"
-                            logger.info(f"Updating package name from 'stream-image' to '{new_package_name}'")
-                            
-                            # Get current pipeline nodes
-                            pipeline = project.pipelines.get(pipeline_id=pipeline.id)
-                            current_nodes = pipeline.nodes
-                            
-                            # Find and update the code node
-                            updated_nodes = []
-                            node_updated = False
-                            for node in current_nodes:
-                                if node.get('type') == 'code' and node.get('namespace', {}).get('packageName') == 'stream-image':
-                                    # Update the package name
-                                    if 'namespace' not in node:
-                                        node['namespace'] = {}
-                                    node['namespace']['packageName'] = new_package_name
-                                    # Also update serviceName and name if they reference stream-image
-                                    if node.get('name') == 'stream-image':
-                                        node['name'] = new_package_name
-                                    if node.get('namespace', {}).get('serviceName') == 'stream-image':
-                                        node['namespace']['serviceName'] = new_package_name
-                                    if node.get('metadata', {}).get('codeApplicationName') == 'stream-image':
-                                        node['metadata']['codeApplicationName'] = new_package_name
-                                    node_updated = True
-                                    logger.info(f"Updated code node to use package name: {new_package_name}")
-                                updated_nodes.append(node)
-                            
-                            if node_updated:
-                                # Update pipeline with new node configuration
-                                pipeline_update = {
-                                    "nodes": updated_nodes,
-                                    "connections": pipeline.connections if hasattr(pipeline, 'connections') else [],
-                                    "startNodes": pipeline.start_nodes if hasattr(pipeline, 'start_nodes') else []
-                                }
-                                
-                                headers = {'Authorization': f'Bearer {dl.token()}'}
-                                base_url = dl.environment()
-                                
-                                update_response = requests.patch(
-                                    f"{base_url}/pipelines/{pipeline.id}",
-                                    json=pipeline_update,
-                                    headers=headers
-                                )
-                                
-                                if update_response.status_code == 200:
-                                    logger.info("Pipeline nodes updated successfully with new package name")
-                                    # Refresh pipeline
-                                    pipeline = project.pipelines.get(pipeline_id=pipeline.id)
-                                    # Retry installation with new package name
-                                    if retry < max_install_retries - 1:
-                                        logger.info(f"Retrying pipeline installation with new package name (attempt {retry + 2}/{max_install_retries})...")
-                                        continue
-                                else:
-                                    logger.error(f"Failed to update pipeline nodes: {update_response.status_code} - {update_response.text}")
-                            else:
-                                logger.warning("Could not find code node to update")
-                    except Exception as comp_error:
-                        logger.warning(f"Could not fetch composition or update nodes: {comp_error}")
-                
                 # Check if installation succeeded
-                if pipeline.status in ['installed', 'active']:
+                if pipeline.status in ['Installed']:
                     logger.info("Pipeline installed successfully")
                     install_success = True
                     break
@@ -2378,60 +2291,248 @@ class ServiceRunner:
                     logger.warning(f"Pipeline status after install: {pipeline.status}")
                     
             except Exception as e:
+                install_exception = e
                 error_str = str(e)
-                # Check if error is about package already existing
-                if 'already exist' in error_str.lower() or 'already exists' in error_str.lower() or 'package' in error_str.lower():
-                    logger.warning(f"Package conflict during pipeline install (attempt {retry + 1}/{max_install_retries}): {e}")
-                    if retry < max_install_retries - 1:
-                        # Try to get the existing package and continue, or wait and retry
-                        try:
-                            # Check if package exists - if so, it's okay to continue
-                            packages = project.packages.list()
-                            stream_image_pkg = None
-                            for pkg in packages:
-                                if pkg.name == 'stream-image':
-                                    stream_image_pkg = pkg
-                                    break
+                logger.warning(f"Pipeline install raised exception: {error_str}")
+            
+            # Check if installation failed (either via exception or status)
+            should_check_error = False
+            error_message = None
+            
+            if install_exception:
+                error_str = str(install_exception)
+                error_message = error_str
+                should_check_error = True
+                logger.info(f"Checking exception message for package conflict: {error_str[:200]}")
+                # Also check if error is in tuple format (common in Dataloop SDK)
+                if isinstance(install_exception, tuple) and len(install_exception) >= 2:
+                    error_message = str(install_exception[1]) if install_exception[1] else error_str
+                    logger.info(f"Extracted error from tuple: {error_message[:200]}")
+            
+            # Also check pipeline status if no exception or status is Failure
+            try:
+                pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+                if pipeline.status == "Failure":
+                    should_check_error = True
+                    logger.warning(f"Pipeline installation failed with status: {pipeline.status}")
+                    # Try to fetch composition to get error details
+                    try:
+                        # Try to get composition_id from pipeline
+                        composition_id = None
+                        if hasattr(pipeline, 'composition_id'):
+                            composition_id = pipeline.composition_id
+                        elif hasattr(pipeline, 'composition') and hasattr(pipeline.composition, 'id'):
+                            composition_id = pipeline.composition.id
+                        elif hasattr(pipeline, 'composition') and isinstance(pipeline.composition, dict):
+                            composition_id = pipeline.composition.get('id')
+                        
+                        if composition_id:
+                            logger.info(f"Fetching composition {composition_id}...")
+                            composition = project.composition.get(composition_id=composition_id)
+                            error_text = composition.get('errorText') if isinstance(composition, dict) else getattr(composition, 'errorText', None)
+                            if error_text:
+                                if isinstance(error_text, dict):
+                                    error_message = error_text.get('message', '')
+                                else:
+                                    error_message = str(error_text)
+                                if error_message:
+                                    logger.info(f"Found error in composition.errorText: {error_message}")
+                            else:
+                                logger.info(f"No error in composition.errorText")
+                                # Also try to access as dict
+                                if isinstance(composition, dict):
+                                    error_message = composition.get('errorText', {}).get('message', '') or composition.get('error', {}).get('message', '')
+                                    if error_message:
+                                        logger.info(f"Found error in composition dict: {error_message}")
+                        else:
+                            logger.warning("Could not find composition_id from pipeline")
+                            # Fallback: try direct access
+                            if hasattr(pipeline, 'composition'):
+                                composition = pipeline.composition
+                                if isinstance(composition, dict):
+                                    error_text = composition.get('errorText', {})
+                                    if isinstance(error_text, dict):
+                                        error_message = error_text.get('message', '')
+                                    else:
+                                        error_message = str(error_text) if error_text else None
+                                    if error_message:
+                                        logger.info(f"Found error in pipeline.composition: {error_message}")
+                    except Exception as comp_error:
+                        logger.warning(f"Could not fetch composition: {comp_error}")
+                        import traceback
+                        logger.debug(traceback.format_exc())
+            except Exception as refresh_error:
+                logger.warning(f"Could not refresh pipeline: {refresh_error}")
+            
+            # Check if error is about stream-image package already existing
+            # Check for various forms of the error message
+            package_conflict_detected = False
+            if should_check_error and error_message:
+                error_lower = error_message.lower()
+                if ('package with the name stream-image already exist' in error_lower or
+                    'package stream-image already exist' in error_lower or
+                    'package name stream-image already exist' in error_lower or
+                    ('stream-image' in error_lower and 'already exist' in error_lower)):
+                    package_conflict_detected = True
+                    logger.info(f"Package conflict detected in error message: {error_message[:200]}")
+            
+            if package_conflict_detected:
+                logger.warning("Package name conflict detected - updating code node to use unique package name")
+                
+                # Generate unique package name
+                import time as time_module
+                unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
+                new_package_name = f"stream-image-{unique_suffix}"
+                logger.info(f"Updating package name from 'stream-image' to '{new_package_name}'")
+                
+                # Get current pipeline nodes
+                try:
+                    pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+                    current_nodes = pipeline.nodes
+                    logger.info(f"Found {len(current_nodes)} nodes in pipeline")
+                    
+                    # Find and update the code node
+                    updated_nodes = []
+                    node_updated = False
+                    for i, node in enumerate(current_nodes):
+                        # Convert node to dict if it's an object
+                        if not isinstance(node, dict):
+                            try:
+                                node = node.to_dict() if hasattr(node, 'to_dict') else dict(node)
+                            except:
+                                node = dict(node) if hasattr(node, '__dict__') else node
+                        
+                        node_type = node.get('type', '')
+                        node_name = node.get('name', '')
+                        node_namespace = node.get('namespace', {})
+                        package_name = node_namespace.get('packageName', '') if isinstance(node_namespace, dict) else ''
+                        
+                        logger.info(f"Node {i}: type={node_type}, name={node_name}, packageName={package_name}")
+                        
+                        # Check if this is the code node with stream-image package
+                        is_code_node = node_type == 'code'
+                        has_stream_image = (package_name == 'stream-image' or 
+                                          node_name == 'stream-image' or
+                                          'stream-image' in str(node).lower())
+                        
+                        if is_code_node and has_stream_image:
+                            logger.info(f"Found code node to update: {node}")
+                            # Create a deep copy of the node to modify
+                            import copy
+                            updated_node = copy.deepcopy(node)
                             
-                            if stream_image_pkg:
-                                logger.info(f"Found existing stream-image package ({stream_image_pkg.id}) - pipeline should work with it")
-                                # Package exists, pipeline installation might have partially succeeded
-                                # Refresh pipeline and check if it's installed
+                            # Ensure namespace exists
+                            if 'namespace' not in updated_node or not isinstance(updated_node.get('namespace'), dict):
+                                updated_node['namespace'] = {}
+                            
+                            # Update the package name
+                            updated_node['namespace']['packageName'] = new_package_name
+                            logger.info(f"Updated namespace.packageName to: {new_package_name}")
+                            
+                            # Also update serviceName and name if they reference stream-image
+                            if updated_node.get('name') == 'stream-image':
+                                updated_node['name'] = new_package_name
+                                logger.info(f"Updated node name to: {new_package_name}")
+                            
+                            if updated_node.get('namespace', {}).get('serviceName') == 'stream-image':
+                                updated_node['namespace']['serviceName'] = new_package_name
+                                logger.info(f"Updated namespace.serviceName to: {new_package_name}")
+                            
+                            if updated_node.get('metadata', {}).get('codeApplicationName') == 'stream-image':
+                                if 'metadata' not in updated_node:
+                                    updated_node['metadata'] = {}
+                                updated_node['metadata']['codeApplicationName'] = new_package_name
+                                logger.info(f"Updated metadata.codeApplicationName to: {new_package_name}")
+                            
+                            updated_nodes.append(updated_node)
+                            node_updated = True
+                            logger.info(f"Updated code node namespace: {updated_node.get('namespace')}")
+                        else:
+                            # Keep other nodes as-is (convert to dict if needed)
+                            if not isinstance(node, dict):
                                 try:
-                                    pipeline = project.pipelines.get(pipeline_id=pipeline.id)
-                                    if pipeline.status in ['installed', 'active']:
-                                        logger.info("Pipeline is already installed despite package error")
-                                        install_success = True
-                                        break
+                                    node = node.to_dict() if hasattr(node, 'to_dict') else dict(node)
                                 except:
                                     pass
-                            
-                            # Wait a bit before retry
-                            import time as time_module
-                            time_module.sleep(2)
-                            logger.info(f"Retrying pipeline installation (attempt {retry + 2}/{max_install_retries})...")
-                        except Exception as check_error:
-                            logger.warning(f"Error checking packages: {check_error}")
-                            if retry < max_install_retries - 1:
-                                import time as time_module
-                                time_module.sleep(2)
-                                continue
-                    else:
-                        # Last retry failed - log but don't fail completely
-                        logger.warning(f"Pipeline installation failed after {max_install_retries} attempts: {e}")
-                        logger.warning("Pipeline may still work if package already exists")
-                        # Check if pipeline is actually installed despite the error
-                        try:
+                            updated_nodes.append(node)
+                    
+                    if node_updated:
+                        # Get connections and startNodes
+                        connections = []
+                        start_nodes = []
+                        
+                        # Try different ways to get connections
+                        if hasattr(pipeline, 'connections'):
+                            connections = pipeline.connections
+                        elif hasattr(pipeline, 'composition') and hasattr(pipeline.composition, 'connections'):
+                            connections = pipeline.composition.connections
+                        
+                        # Try different ways to get startNodes
+                        if hasattr(pipeline, 'start_nodes'):
+                            start_nodes = pipeline.start_nodes
+                        elif hasattr(pipeline, 'startNodes'):
+                            start_nodes = pipeline.startNodes
+                        elif hasattr(pipeline, 'composition') and hasattr(pipeline.composition, 'startNodes'):
+                            start_nodes = pipeline.composition.startNodes
+                        
+                        logger.info(f"Updating pipeline with {len(updated_nodes)} nodes, {len(connections)} connections, {len(start_nodes)} startNodes")
+                        
+                        # Update pipeline with new node configuration
+                        pipeline_update = {
+                            "nodes": updated_nodes,
+                            "connections": connections,
+                            "startNodes": start_nodes
+                        }
+                        
+                        # Log the update payload (first node only for debugging)
+                        if updated_nodes:
+                            logger.info(f"First node in update: {updated_nodes[0]}")
+                        
+                        headers = {'Authorization': f'Bearer {dl.token()}'}
+                        base_url = dl.environment()
+                        
+                        logger.info(f"Patching pipeline {pipeline.id} with updated nodes...")
+                        update_response = requests.patch(
+                            f"{base_url}/pipelines/{pipeline.id}",
+                            json=pipeline_update,
+                            headers=headers
+                        )
+                        
+                        logger.info(f"Pipeline update response: {update_response.status_code}")
+                        if update_response.status_code != 200:
+                            logger.error(f"Update response text: {update_response.text}")
+                        
+                        if update_response.status_code == 200:
+                            logger.info("Pipeline nodes updated successfully with new package name")
+                            # Refresh pipeline and verify the update
                             pipeline = project.pipelines.get(pipeline_id=pipeline.id)
-                            if pipeline.status in ['installed', 'active']:
-                                logger.info("Pipeline appears to be installed despite error")
-                                install_success = True
-                        except:
-                            pass
-                else:
-                    # Different error - don't retry
-                    logger.warning(f"Could not install pipeline (non-retryable error): {e}")
-                    break
+                            # Verify the update worked
+                            verify_nodes = pipeline.nodes
+                            for vnode in verify_nodes:
+                                if vnode.get('type') == 'code':
+                                    v_package = vnode.get('namespace', {}).get('packageName', '')
+                                    logger.info(f"Verified: code node packageName is now: {v_package}")
+                            
+                            # Retry installation with new package name
+                            if retry < max_install_retries - 1:
+                                logger.info(f"Retrying pipeline installation with new package name (attempt {retry + 2}/{max_install_retries})...")
+                                continue
+                        else:
+                            logger.error(f"Failed to update pipeline nodes: {update_response.status_code} - {update_response.text}")
+                    else:
+                        logger.warning("Could not find code node to update")
+                except Exception as update_error:
+                    logger.error(f"Error updating pipeline nodes: {update_error}")
+                    import traceback
+                    logger.debug(traceback.format_exc())
+            
+            # If we get here and haven't succeeded, check if it's a retryable error
+            if not install_success and retry < max_install_retries - 1:
+                if error_message and ('already exist' in error_message.lower() or 'package' in error_message.lower()):
+                    import time as time_module
+                    time_module.sleep(2)
+                    logger.info(f"Retrying pipeline installation (attempt {retry + 2}/{max_install_retries})...")
+                    continue
         
         if not install_success:
             logger.warning("Pipeline installation had issues, but pipeline was created. You may need to install it manually.")
