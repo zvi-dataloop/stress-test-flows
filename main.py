@@ -778,14 +778,16 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 })
                 return
             
-            # Mark as cancelling
+            # Mark as cancelling immediately
             progress['status'] = 'cancelling'
+            progress['current_step'] = 'cancel'
             progress['logs'].append({
                 'timestamp': time.time(),
                 'step': 'cancel',
                 'level': 'INFO',
                 'message': 'Cancellation requested - uninstalling and deleting pipeline...'
             })
+            logger.info(f"Workflow {workflow_id} marked as cancelling")
             
             # Get pipeline_id from result
             pipeline_id = None
@@ -890,12 +892,15 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'timestamp': time.time(),
                 'step': 'cancel',
                 'level': 'INFO',
-                'message': 'Workflow cancelled successfully'
+                'message': 'Workflow cancelled successfully - pipeline uninstalled and deleted'
             })
+            
+            logger.info(f"Workflow {workflow_id} cancelled successfully")
             
             self._send_json({
                 'success': True,
-                'message': 'Workflow cancelled successfully - pipeline uninstalled and deleted'
+                'message': 'Workflow cancelled successfully - pipeline uninstalled and deleted',
+                'pipeline_id': pipeline_id if pipeline_id else None
             })
             
         except Exception as e:

@@ -422,8 +422,10 @@
         }
         
         async function cancelWorkflow() {
+            console.log('cancelWorkflow called, currentWorkflowId:', currentWorkflowId);
+            
             if (!currentWorkflowId) {
-                addLog('No active workflow to cancel', 'warning');
+                addLog('⚠️ No active workflow to cancel', 'warning');
                 return;
             }
             
@@ -437,32 +439,76 @@
                 cancelBtn.textContent = '⏳ Cancelling...';
             }
             
-            addLog('⛔ Cancelling workflow...', 'warning');
+            // Immediately show cancellation message
+            addLog('⛔ Cancellation requested - stopping workflow and cleaning up pipeline...', 'warning');
+            updateStatus('cancelling', 'Cancelling...');
             
             try {
+                console.log(`Calling cancel API: ${API_BASE_URL}/api/cancel-workflow/${currentWorkflowId}`);
                 const response = await fetch(`${API_BASE_URL}/api/cancel-workflow/${currentWorkflowId}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 });
                 
+                console.log('Cancel API response status:', response.status);
+                
                 if (!response.ok) {
                     const errorText = await response.text();
+                    console.error('Cancel API error:', errorText);
                     throw new Error(`HTTP ${response.status}: ${errorText}`);
                 }
                 
                 const result = await response.json();
+                console.log('Cancel API result:', result);
                 
                 if (result.error) {
                     throw new Error(result.error);
                 }
                 
-                addLog(`✓ ${result.message || 'Workflow cancelled successfully'}`, 'success');
-                updateStatus('cancelled', 'Cancelled');
+                // Show success message immediately
+                addLog(`✓ ${result.message || 'Workflow cancellation initiated'}`, 'success');
+                updateStatus('cancelling', 'Cancelling...');
                 
-                // Stop polling
-                currentWorkflowId = null;
+                // Immediately fetch and display cancellation logs
+                try {
+                    const logResponse = await fetch(`${API_BASE_URL}/api/workflow-progress/${currentWorkflowId}`, {
+                        method: 'GET',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+                    if (logResponse.ok) {
+                        const logProgress = await logResponse.json();
+                        const status = logProgress.status || 'unknown';
+                        console.log('Workflow status after cancel:', status);
+                        
+                        // Add all cancellation-related logs immediately
+                        if (logProgress.logs && logProgress.logs.length > 0) {
+                            const cancelLogs = logProgress.logs.filter(log => 
+                                log.step === 'cancel' || 
+                                log.message.toLowerCase().includes('cancel') || 
+                                log.message.toLowerCase().includes('uninstall') || 
+                                log.message.toLowerCase().includes('delete') ||
+                                log.message.toLowerCase().includes('pipeline')
+                            );
+                            cancelLogs.forEach(log => {
+                                const level = log.level?.toLowerCase() || 'info';
+                                addLog(`[${log.step || 'cancel'}] ${log.message}`, level);
+                            });
+                        }
+                        
+                        if (status === 'cancelled') {
+                            updateStatus('cancelled', 'Cancelled');
+                            addLog('⛔ Workflow cancelled - pipeline uninstalled and deleted', 'warning');
+                        } else if (status === 'cancelling') {
+                            updateStatus('cancelling', 'Cancelling...');
+                            addLog('⏳ Cancellation in progress...', 'info');
+                        }
+                    }
+                } catch (logError) {
+                    console.error('Error fetching cancellation logs:', logError);
+                }
                 
             } catch (error) {
+                console.error('Cancel workflow error:', error);
                 addLog(`❌ Error cancelling workflow: ${error.message}`, 'error');
                 updateStatus('error', 'Cancel Failed');
             } finally {
@@ -560,6 +606,9 @@
                     cancelBtn.style.display = 'inline-flex';
                 }
                 
+                // Initialize polling flag
+                window._pollingWorkflowId = result.workflow_id;
+                
                 // Poll for workflow progress
                 await pollWorkflowProgress(result.workflow_id);
                 
@@ -616,8 +665,17 @@
             let pollCount = 0;
             const maxPolls = 3600; // Poll for up to 1 hour (3600 * 1 second)
             let lastLogCount = 0;
+            let shouldStopPolling = false; // Flag to stop polling when cancelled
             
-            while (pollCount < maxPolls) {
+            // Store polling flag in global scope so cancel can stop it
+            window._pollingWorkflowId = workflowId;
+            
+            while (pollCount < maxPolls && !shouldStopPolling) {
+                // Check if workflow was cancelled externally (but still poll once more to get logs)
+                if (window._pollingWorkflowId !== workflowId && pollCount > 0) {
+                    shouldStopPolling = true;
+                    break;
+                }
                 try {
                     const response = await fetch(`${API_BASE_URL}/api/workflow-progress/${workflowId}`, {
                         method: 'GET',
@@ -666,9 +724,16 @@
                             const step = log.step || null;
                             const message = log.message || '';
                             
+                            // Always show cancellation-related logs immediately
+                            if (step === 'cancel' || message.toLowerCase().includes('cancel') || 
+                                message.toLowerCase().includes('uninstall') || 
+                                message.toLowerCase().includes('delete') ||
+                                message.toLowerCase().includes('pipeline')) {
+                                addLog(`${step ? `[${step}] ` : ''}${message}`, level);
+                                clearBatchProgressLine(); // Clear any batch progress when cancellation logs appear
+                            }
                             // Check if this is a batch execution progress update
-                            // Update in place for ALL execute_pipeline_batch messages that look like progress updates
-                            const isProgressMessage = step === 'execute_pipeline_batch' && 
+                            else if (step === 'execute_pipeline_batch' && 
                                 (message.includes('Progress:') || 
                                  message.includes('items completed') || 
                                  message.includes('Success:') || 
@@ -676,9 +741,7 @@
                                  message.includes('In Progress:') ||
                                  message.includes('Waiting for statistics') ||
                                  message.includes('Polling') ||
-                                 message.includes('Elapsed:'));
-                            
-                            if (isProgressMessage) {
+                                 message.includes('Elapsed:'))) {
                                 // Update the progress line in place
                                 updateBatchProgressLog(message, level, step);
                             } else {
@@ -693,14 +756,18 @@
                         lastLogCount = logs.length;
                     }
                     
-                    // Check if workflow is complete or cancelled
-                    if (status === 'completed' || status === 'cancelled') {
+                    // Check if workflow is complete, cancelled, or cancelling
+                    if (status === 'completed' || status === 'cancelled' || status === 'cancelling') {
                         // Clear batch progress line when workflow completes
                         clearBatchProgressLine();
                         // Save final state
                         saveWorkflowProgress(workflowId, progress);
                         if (status === 'cancelled') {
                             addLog('⛔ Workflow cancelled - pipeline uninstalled and deleted', 'warning');
+                            shouldStopPolling = true;
+                        } else if (status === 'cancelling') {
+                            addLog('⏳ Workflow cancellation in progress...', 'warning');
+                            // Continue polling to see cancellation logs
                         } else if (progress.result) {
                             addLog('🎉 Full workflow completed successfully!', 'success');
                             // Show summary
@@ -726,28 +793,41 @@
                             addLog('✓ Workflow completed', 'success');
                         }
                         break;
-                    } else if (status === 'failed' || status === 'cancelled') {
-                        // Clear batch progress line when workflow fails or is cancelled
+                    } else if (status === 'failed') {
+                        // Clear batch progress line when workflow fails
                         clearBatchProgressLine();
                         // Save final state
                         saveWorkflowProgress(workflowId, progress);
-                        if (status === 'cancelled') {
-                            addLog('⛔ Workflow cancelled - pipeline uninstalled and deleted', 'warning');
-                        } else {
-                            const errorMsg = progress.error || 'Unknown error';
-                            addLog(`✗ Workflow failed: ${errorMsg}`, 'error');
-                        }
+                        const errorMsg = progress.error || 'Unknown error';
+                        addLog(`✗ Workflow failed: ${errorMsg}`, 'error');
+                        shouldStopPolling = true;
+                        break;
+                    }
+                    
+                    // Check if we should stop polling (cancelled externally)
+                    if (shouldStopPolling || window._pollingWorkflowId !== workflowId) {
+                        addLog('⏹️ Polling stopped', 'info');
                         break;
                     }
                 } catch (error) {
                     addLog(`Polling error: ${error.message}`, 'warning');
                 }
                 
+                // Check if we should stop before next poll
+                if (shouldStopPolling || window._pollingWorkflowId !== workflowId) {
+                    break;
+                }
+                
                 await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
                 pollCount++;
             }
             
-            if (pollCount >= maxPolls) {
+            // Clear polling flag
+            if (window._pollingWorkflowId === workflowId) {
+                window._pollingWorkflowId = null;
+            }
+            
+            if (pollCount >= maxPolls && !shouldStopPolling) {
                 addLog('⚠ Polling timeout - workflow may still be running', 'warning');
             }
         }
