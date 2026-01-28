@@ -2029,8 +2029,12 @@ class StressTestServer(dl.BaseServiceRunner):
             if dpk_to_install is not None:
                 try:
                     logger.info(f"Installing DPK: {dpk_to_install.name} v{dpk_to_install.version}")
+                    logger.info("DPK installation may take several minutes - please wait...")
+                    logger.info("This step installs the ResNet DPK which includes services and models...")
+                    
+                    # Install DPK (this can take a while)
                     app = project.apps.install(dpk=dpk_to_install)
-                    logger.info(f"Installed app: {app.name} (ID: {app.id})")
+                    logger.info(f"✓ DPK installation completed: {app.name} (ID: {app.id})")
                     # Update installed_dpk_name to match what was actually installed
                     installed_dpk_name = dpk_to_install.name
                     logger.info(f"Using DPK name: {installed_dpk_name} for pipeline node")
@@ -2038,8 +2042,11 @@ class StressTestServer(dl.BaseServiceRunner):
                     # Wait a bit for the model to be created
                     logger.info("Waiting 5 seconds for model to be initialized...")
                     time.sleep(5)
+                        
                 except Exception as e:
                     logger.error(f"Failed to install DPK: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
                     return {'error': f'Failed to install DPK: {str(e)}'}
             else:
                 logger.info(f"DPK installation skipped - using existing app: {app.name if app else 'N/A'}")
@@ -2063,6 +2070,7 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("Step 2: Getting model from project...")
         model = None
         try:
+            logger.info("Listing models in project (this may take a moment)...")
             models = list(project.models.list().all())
             logger.info(f"Found {len(models)} models in project")
             for m in models:
@@ -2141,11 +2149,12 @@ class StressTestServer(dl.BaseServiceRunner):
             headers = {'Authorization': f'Bearer {dl.token()}'}
             base_url = dl.environment()
             
-            logger.info(f"Adding 2 nodes to pipeline...")
+            logger.info(f"Step 4d: Adding 2 nodes to pipeline...")
             
             # Code node for streaming/downloading image
             # Root node receives items from batch execution
             # Package config is always included (existing package was renamed if it existed)
+            logger.info("Creating code node configuration...")
             code_node = {
                 "id": code_node_id,
                 "inputs": [
@@ -2259,6 +2268,7 @@ class ServiceRunner:
                 }]
             }
             
+            logger.info(f"Step 4e: Updating pipeline with nodes via API...")
             node_response = requests.patch(
                 f"{base_url}/pipelines/{pipeline.id}",
                 json=pipeline_update,
@@ -2269,7 +2279,7 @@ class ServiceRunner:
                 logger.error(f"Pipeline API response: {node_response.status_code} - {node_response.text}")
                 node_response.raise_for_status()
             
-            logger.info(f"Updated pipeline with node: {node_response.status_code}")
+            logger.info(f"✓ Updated pipeline with nodes: {node_response.status_code}")
             
             # Log the response to verify
             result = node_response.json()
@@ -2277,7 +2287,9 @@ class ServiceRunner:
             logger.info(f"Pipeline variables: {result.get('variables', [])}")
             
             # Refresh pipeline
+            logger.info("Refreshing pipeline object...")
             pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+            logger.info(f"✓ Pipeline refreshed: {pipeline.id}")
             
         except Exception as e:
             logger.error(f"Failed to update pipeline: {e}")
@@ -2290,14 +2302,18 @@ class ServiceRunner:
             }
         
         # Install the pipeline (with retry for package conflicts)
+        logger.info(f"Step 4f: Installing pipeline (this may take a few minutes)...")
         max_install_retries = 3
         install_success = False
         for retry in range(max_install_retries):
             install_exception = None
             try:
+                logger.info(f"Installing pipeline (attempt {retry + 1}/{max_install_retries})...")
                 pipeline.install()
+                logger.info("Pipeline install() call completed, refreshing pipeline status...")
                 # Refresh pipeline to get latest status
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+                logger.info(f"Pipeline status after install: {pipeline.status}")
                 
                 # Check if installation succeeded
                 if pipeline.status in ['Installed']:
