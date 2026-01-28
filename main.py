@@ -888,7 +888,58 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     })
                     # Continue with delete even if uninstall fails
                 
-                # Delete pipeline (always try this, even if uninstall failed)
+                # Pause the pipeline itself before deleting
+                try:
+                    logger.info(f"Pausing pipeline {pipeline_id}...")
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'INFO',
+                        'message': f'Pausing pipeline...'
+                    })
+                    
+                    # Pause the pipeline
+                    if hasattr(pipeline, 'pause'):
+                        try:
+                            pipeline.pause()
+                            logger.info(f"Pipeline {pipeline_id} paused successfully")
+                            progress['logs'].append({
+                                'timestamp': time.time(),
+                                'step': 'cancel',
+                                'level': 'INFO',
+                                'message': f'Pipeline paused successfully'
+                            })
+                            # Wait a moment for pipeline to pause
+                            time.sleep(2)  # Give pipeline time to pause
+                        except Exception as pause_err:
+                            logger.warning(f"Pipeline pause() method failed: {pause_err}")
+                            progress['logs'].append({
+                                'timestamp': time.time(),
+                                'step': 'cancel',
+                                'level': 'WARNING',
+                                'message': f'Could not pause pipeline (will try to delete anyway): {str(pause_err)}'
+                            })
+                    else:
+                        logger.warning(f"Pipeline {pipeline_id} does not have pause() method")
+                        progress['logs'].append({
+                            'timestamp': time.time(),
+                            'step': 'cancel',
+                            'level': 'WARNING',
+                            'message': 'Pipeline does not support pause (will try to delete anyway)'
+                        })
+                        
+                except Exception as pause_error:
+                    logger.warning(f"Failed to pause pipeline {pipeline_id}: {pause_error}")
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'WARNING',
+                        'message': f'Could not pause pipeline (will try to delete anyway): {str(pause_error)}'
+                    })
+                    # Continue with delete even if pause fails
+                    # Continue with delete attempt anyway
+                
+                # Delete pipeline (always try this, even if uninstall or stop failed)
                 try:
                     logger.info(f"Deleting pipeline {pipeline_id}...")
                     pipeline.delete()
@@ -899,14 +950,44 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                         'message': f'Pipeline {pipeline_id} deleted successfully'
                     })
                 except Exception as delete_error:
-                    logger.error(f"Failed to delete pipeline {pipeline_id}: {delete_error}")
-                    progress['logs'].append({
-                        'timestamp': time.time(),
-                        'step': 'cancel',
-                        'level': 'ERROR',
-                        'message': f'Failed to delete pipeline: {str(delete_error)}'
-                    })
-                    raise
+                    error_str = str(delete_error)
+                    # Check if it's the "unfinished execution" error
+                    if 'unfinished execution' in error_str.lower() or 'still running' in error_str.lower():
+                        logger.warning(f"Pipeline still has running executions, retrying after longer wait...")
+                        progress['logs'].append({
+                            'timestamp': time.time(),
+                            'step': 'cancel',
+                            'level': 'WARNING',
+                            'message': 'Pipeline still has running executions, waiting 5 seconds...'
+                        })
+                        time.sleep(5)  # Wait longer for executions to finish
+                        # Try delete again
+                        try:
+                            pipeline.delete()
+                            progress['logs'].append({
+                                'timestamp': time.time(),
+                                'step': 'cancel',
+                                'level': 'INFO',
+                                'message': f'Pipeline {pipeline_id} deleted successfully (after retry)'
+                            })
+                        except Exception as retry_error:
+                            logger.error(f"Failed to delete pipeline after retry: {retry_error}")
+                            progress['logs'].append({
+                                'timestamp': time.time(),
+                                'step': 'cancel',
+                                'level': 'ERROR',
+                                'message': f'Failed to delete pipeline: {str(retry_error)}. You may need to manually stop executions and delete the pipeline.'
+                            })
+                            raise
+                    else:
+                        logger.error(f"Failed to delete pipeline {pipeline_id}: {delete_error}")
+                        progress['logs'].append({
+                            'timestamp': time.time(),
+                            'step': 'cancel',
+                            'level': 'ERROR',
+                            'message': f'Failed to delete pipeline: {str(delete_error)}'
+                        })
+                        raise
             
             except dl.exceptions.NotFound:
                 logger.warning(f"Pipeline {pipeline_id} not found - may have been already deleted")
