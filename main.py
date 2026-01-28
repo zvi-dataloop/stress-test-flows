@@ -791,17 +791,20 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             
             # Get pipeline_id from result
             pipeline_id = None
-            if progress.get('result'):
+            result = progress.get('result')
+            if result and isinstance(result, dict):
                 # Try to get from result directly
-                pipeline_id = progress['result'].get('pipeline_id')
+                pipeline_id = result.get('pipeline_id')
                 if not pipeline_id:
                     # Try to get from steps
-                    steps = progress['result'].get('steps', [])
-                    for step in steps:
-                        if step.get('step') == 'create_pipeline':
-                            step_result = step.get('result', {})
-                            pipeline_id = step_result.get('pipeline_id')
-                            break
+                    steps = result.get('steps', [])
+                    if steps and isinstance(steps, list):
+                        for step in steps:
+                            if step and isinstance(step, dict) and step.get('step') == 'create_pipeline':
+                                step_result = step.get('result', {})
+                                if step_result and isinstance(step_result, dict):
+                                    pipeline_id = step_result.get('pipeline_id')
+                                    break
             
             if not pipeline_id:
                 # Try to get from current step result
@@ -826,7 +829,12 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             # Uninstall and delete pipeline
             try:
                 # Get project first (needed for proper pipeline access)
-                project_id = progress.get('result', {}).get('project_id') or os.environ.get('DL_PROJECT_ID') or os.environ.get('PROJECT_ID')
+                result = progress.get('result')
+                project_id = None
+                if result and isinstance(result, dict):
+                    project_id = result.get('project_id')
+                if not project_id:
+                    project_id = os.environ.get('DL_PROJECT_ID') or os.environ.get('PROJECT_ID')
                 if not project_id:
                     # Try to get pipeline to extract project
                     try:
@@ -2088,7 +2096,7 @@ class StressTestServer(dl.BaseServiceRunner):
         # Step 4: Create new pipeline with 2 nodes: code node (stream-image) -> ResNet
         logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
         
-        # Check if stream-image package already exists and rename it if needed
+        # Check if stream-image package/DPK already exists and rename it if needed
         try:
             existing_package = project.packages.get(package_name='stream-image')
             if existing_package:
@@ -2106,12 +2114,21 @@ class StressTestServer(dl.BaseServiceRunner):
                     logger.info(f"Successfully renamed package to: {new_package_name}")
                 except Exception as rename_error:
                     logger.warning(f"Could not rename package: {rename_error}")
-                    # Try alternative method - delete and recreate might be needed
-                    logger.warning("Package rename failed, but will proceed - pipeline creation may fail")
+                    # Try to delete it instead
+                    try:
+                        logger.info(f"Trying to delete existing package instead...")
+                        existing_package.delete()
+                        logger.info(f"Successfully deleted existing package")
+                    except Exception as delete_error:
+                        logger.warning(f"Could not delete package either: {delete_error}")
         except dl.exceptions.NotFound:
             logger.info("No existing stream-image package found - will create new one")
         except Exception as e:
             logger.warning(f"Could not check for existing stream-image package: {e}")
+        
+        # Ensure stream-image package doesn't exist (will be created by pipeline from config)
+        # The pipeline will create the package from the code node config, but it fails if a package with that name already exists
+        logger.info("Ensuring stream-image package name is available for pipeline creation...")
         
         # Create pipeline
         pipeline = project.pipelines.create(name=pipeline_name)
@@ -2160,8 +2177,8 @@ class StressTestServer(dl.BaseServiceRunner):
                     "functionName": "stream_image",
                     "projectName": project.name,
                     "serviceName": "stream-image",
-                    "moduleName": "code_module",
-                    "packageName": "stream-image"
+                    "moduleName": "code_module"
+                    # Note: packageName is not included - package will be created from config.package
                 },
                 "projectId": project.id,
                 "config": {
