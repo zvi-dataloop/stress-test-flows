@@ -2328,7 +2328,7 @@ class ServiceRunner:
                         
                         if composition_id:
                             logger.info(f"Fetching composition {composition_id}...")
-                            composition = project.composition.get(composition_id=composition_id)
+                            composition = project.compositions.get(composition_id=composition_id)
                             error_text = composition.get('errorText') if isinstance(composition, dict) else getattr(composition, 'errorText', None)
                             if error_text:
                                 if isinstance(error_text, dict):
