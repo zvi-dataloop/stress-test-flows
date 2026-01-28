@@ -825,29 +825,70 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             
             # Uninstall and delete pipeline
             try:
-                pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
-                project = pipeline.project
+                # Get project first (needed for proper pipeline access)
+                project_id = progress.get('result', {}).get('project_id') or os.environ.get('DL_PROJECT_ID') or os.environ.get('PROJECT_ID')
+                if not project_id:
+                    # Try to get pipeline to extract project
+                    try:
+                        pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
+                        project = pipeline.project
+                        project_id = project.id
+                    except:
+                        # Fallback: try to get from workflow progress
+                        logger.warning(f"Could not get project from pipeline {pipeline_id}, trying direct delete")
+                        project = None
+                else:
+                    project = dl.projects.get(project_id=project_id)
                 
-                # Uninstall pipeline first
+                # Get pipeline from project context (more reliable)
+                if project:
+                    try:
+                        pipeline = project.pipelines.get(pipeline_id=pipeline_id)
+                    except dl.exceptions.NotFound:
+                        # Fallback to global get
+                        pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
+                else:
+                    pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
+                
+                # Try to uninstall pipeline first (optional - skip if it fails)
+                uninstall_success = False
                 try:
                     logger.info(f"Uninstalling pipeline {pipeline_id}...")
-                    pipeline.uninstall()
-                    progress['logs'].append({
-                        'timestamp': time.time(),
-                        'step': 'cancel',
-                        'level': 'INFO',
-                        'message': f'Pipeline {pipeline_id} uninstalled successfully'
-                    })
+                    # Try uninstall with project context if available
+                    if hasattr(pipeline, 'uninstall'):
+                        try:
+                            pipeline.uninstall()
+                            uninstall_success = True
+                            progress['logs'].append({
+                                'timestamp': time.time(),
+                                'step': 'cancel',
+                                'level': 'INFO',
+                                'message': f'Pipeline {pipeline_id} uninstalled successfully'
+                            })
+                        except Exception as uninstall_err:
+                            # If uninstall fails with identifier error, it's likely not installed or doesn't support uninstall
+                            error_str = str(uninstall_err)
+                            if 'identifier' in error_str.lower() or 'inputs' in error_str.lower():
+                                logger.info(f"Pipeline {pipeline_id} may not be installed or uninstall not supported, skipping uninstall")
+                                progress['logs'].append({
+                                    'timestamp': time.time(),
+                                    'step': 'cancel',
+                                    'level': 'INFO',
+                                    'message': f'Skipping uninstall (pipeline may not be installed)'
+                                })
+                            else:
+                                raise
                 except Exception as uninstall_error:
                     logger.warning(f"Failed to uninstall pipeline {pipeline_id}: {uninstall_error}")
                     progress['logs'].append({
                         'timestamp': time.time(),
                         'step': 'cancel',
                         'level': 'WARNING',
-                        'message': f'Failed to uninstall pipeline: {str(uninstall_error)}'
+                        'message': f'Uninstall failed (non-critical): {str(uninstall_error)}'
                     })
+                    # Continue with delete even if uninstall fails
                 
-                # Delete pipeline
+                # Delete pipeline (always try this, even if uninstall failed)
                 try:
                     logger.info(f"Deleting pipeline {pipeline_id}...")
                     pipeline.delete()
@@ -3074,6 +3115,10 @@ class ServiceRunner:
                 'result': download_result
             })
             filenames = download_result.get('files', [])
+            # Limit filenames to max_images (download_images returns all files in storage, not just downloaded ones)
+            if len(filenames) > max_images:
+                logger.info(f"Limiting filenames to {max_images} from {len(filenames)} files in storage")
+                filenames = filenames[:max_images]
             if progress_callback:
                 progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
         else:
