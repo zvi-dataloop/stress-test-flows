@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Step 6: Execute Pipeline - Nginx Stress-Test</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #ffffff; --bg-secondary: #f8fafc; --bg-tertiary: #f1f5f9; --bg-card: #ffffff;
+            --accent-primary: #0ea5e9; --accent-secondary: #6366f1; --accent-success: #10b981; --accent-warning: #f59e0b; --accent-danger: #ef4444;
+            --text-primary: #0f172a; --text-secondary: #475569; --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --gradient-1: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+            --gradient-execute: linear-gradient(135deg, #10b981 0%, #0ea5e9 100%);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg-secondary); color: var(--text-primary); min-height: 100vh; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 40px 24px; }
+        .breadcrumb { display: flex; gap: 8px; margin-bottom: 32px; font-size: 14px; color: var(--text-muted); }
+        .breadcrumb a { color: var(--accent-primary); text-decoration: none; }
+        .page-header { display: flex; align-items: center; gap: 20px; margin-bottom: 40px; }
+        .step-badge { width: 64px; height: 64px; background: var(--gradient-execute); border-radius: 16px; display: flex; align-items: center; justify-content: center; font-size: 28px; font-weight: 700; color: white; }
+        .page-title h1 { font-size: 32px; font-weight: 700; margin-bottom: 4px; }
+        .page-title p { font-size: 16px; color: var(--text-secondary); }
+        .flow-nav { display: flex; justify-content: center; gap: 8px; margin-bottom: 40px; flex-wrap: wrap; }
+        .nav-pill { padding: 8px 16px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 100px; color: var(--text-secondary); text-decoration: none; font-weight: 500; font-size: 12px; box-shadow: var(--shadow-sm); }
+        .nav-pill:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+        .nav-pill.active { background: var(--gradient-execute); border-color: transparent; color: white; }
+
+        .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; margin-bottom: 24px; box-shadow: var(--shadow-sm); }
+        .card h2 { font-size: 18px; margin-bottom: 20px; color: var(--text-primary); }
+        .card h3 { font-size: 15px; margin: 20px 0 12px; color: var(--text-secondary); }
+
+        .code-block { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-primary); overflow-x: auto; white-space: pre; }
+        .code-block.large { padding: 20px; }
+
+        .exec-flow { display: flex; align-items: center; justify-content: center; gap: 16px; padding: 24px; background: var(--bg-tertiary); border-radius: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+        .flow-box { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 14px 20px; text-align: center; min-width: 100px; }
+        .flow-box.highlight { border-color: var(--accent-success); box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1); }
+        .flow-box .icon { font-size: 22px; margin-bottom: 4px; }
+        .flow-box .label { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
+        .flow-arrow { font-size: 18px; color: var(--accent-success); }
+
+        .method-badge { display: inline-block; padding: 4px 10px; border-radius: 6px; font-size: 11px; font-weight: 600; margin-right: 8px; }
+        .method-recommended { background: rgba(16, 185, 129, 0.1); color: var(--accent-success); }
+        .method-alternative { background: rgba(99, 102, 241, 0.1); color: var(--accent-secondary); }
+
+        .checklist { list-style: none; }
+        .checklist li { padding: 14px 0; display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--border-color); font-size: 14px; }
+        .checklist li:last-child { border-bottom: none; }
+        .check-icon { width: 24px; height: 24px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 12px; background: rgba(16, 185, 129, 0.1); color: var(--accent-success); }
+
+        .api-info { background: var(--bg-tertiary); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+        .api-info code { background: var(--bg-card); padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono', monospace; font-size: 12px; }
+
+        .nav-buttons { display: flex; justify-content: space-between; margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border-color); }
+        .btn { padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; border: none; transition: all 0.2s; }
+        .btn-primary { background: var(--gradient-1); color: white; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3); }
+        .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-success { background: var(--accent-success); color: white; }
+        .btn-danger { background: var(--accent-danger); color: white; }
+
+        /* Interactive Controls */
+        .control-panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; margin-bottom: 24px; }
+        .control-panel h2 { font-size: 20px; margin-bottom: 20px; display: flex; align-items: center; gap: 12px; }
+        .control-panel h2::before { content: "⚡"; font-size: 24px; }
+        
+        .config-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+        .form-group { display: flex; flex-direction: column; gap: 8px; }
+        .form-group label { font-size: 12px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+        .form-group input, .form-group select { padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: 'Plus Jakarta Sans', sans-serif; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent-primary); box-shadow: 0 0 0 3px rgba(14, 165, 233, 0.1); }
+
+        .action-buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+        .btn-run-all { background: var(--gradient-execute); color: white; padding: 14px 28px; font-size: 16px; font-weight: 700; }
+        .btn-run-all:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(16, 185, 129, 0.3); }
+
+        /* Log Display */
+        .log-container { background: #1e293b; border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; margin-top: 24px; max-height: 600px; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+        .log-container::-webkit-scrollbar { width: 8px; }
+        .log-container::-webkit-scrollbar-track { background: #0f172a; border-radius: 4px; }
+        .log-container::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+        .log-container::-webkit-scrollbar-thumb:hover { background: #64748b; }
+        
+        .log-entry { padding: 4px 0; line-height: 1.6; word-wrap: break-word; }
+        .log-entry.info { color: #60a5fa; }
+        .log-entry.success { color: #34d399; }
+        .log-entry.warning { color: #fbbf24; }
+        .log-entry.error { color: #f87171; }
+        .log-entry.debug { color: #94a3b8; }
+        .log-timestamp { color: #64748b; margin-right: 8px; }
+        .log-step { color: #a78bfa; font-weight: 600; margin-right: 8px; }
+
+        .status-indicator { display: inline-flex; align-items: center; gap: 8px; padding: 8px 16px; border-radius: 8px; font-size: 14px; font-weight: 600; margin-left: 16px; }
+        .status-indicator.idle { background: rgba(148, 163, 184, 0.1); color: var(--text-secondary); }
+        .status-indicator.running { background: rgba(14, 165, 233, 0.1); color: var(--accent-primary); }
+        .status-indicator.running::before { content: "⏳"; animation: spin 1s linear infinite; }
+        .status-indicator.success { background: rgba(16, 185, 129, 0.1); color: var(--accent-success); }
+        .status-indicator.error { background: rgba(239, 68, 68, 0.1); color: var(--accent-danger); }
+        
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+        .progress-bar { width: 100%; height: 8px; background: var(--bg-tertiary); border-radius: 4px; overflow: hidden; margin-top: 16px; }
+        .progress-fill { height: 100%; background: var(--gradient-execute); transition: width 0.3s ease; width: 0%; }
+    </style>
+</head>
+<body>
+    <div class="container" style="height: 100vh; overflow-y: scroll;">
+        <div class="breadcrumb">
+            <a href="index.html">Overview</a><span>›</span><span>Step 6: Execute Pipeline</span>
+        </div>
+        <div class="page-header">
+            <div class="step-badge">6</div>
+            <div class="page-title">
+                <h1>Execute Pipeline Cycles</h1>
+                <p>Run pipeline on entire dataset to stress test nginx gateway</p>
+            </div>
+        </div>
+        <nav class="flow-nav">
+            <a href="index.html" class="nav-pill">Overview</a>
+            <a href="step1-compute-setup.html" class="nav-pill">Compute Setup</a>
+            <a href="step2-project.html" class="nav-pill">Project & Dataset</a>
+            <a href="step3-download-images.html" class="nav-pill">Download Images</a>
+            <a href="step4-link-items.html" class="nav-pill">Link Items</a>
+            <a href="step5-pipeline.html" class="nav-pill">Pipeline</a>
+            <a href="step6-execute.html" class="nav-pill active">Execute</a>
+        </nav>
+
+        <!-- Interactive Control Panel -->
+        <div class="control-panel">
+            <h2>Run Full Stress Test Workflow</h2>
+            <p style="color: var(--text-secondary); margin-bottom: 20px;">
+                Execute all steps sequentially: Download Images → Create Link Items → Create Pipeline → Execute Batch
+            </p>
+            
+            <div class="config-form">
+                <div class="form-group">
+                    <label>Max Images</label>
+                    <input type="number" id="maxImages" value="50000" min="1" max="123287">
+                </div>
+                <div class="form-group">
+                    <label>Dataset ID</label>
+                    <input type="text" id="datasetId" value="" placeholder="Dataset ID (empty = auto-create)">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Leave empty to automatically create dataset</small>
+                </div>
+                <div class="form-group">
+                    <label>Driver ID</label>
+                    <input type="text" id="driverId" value="rubiks_internal_faas_proxy_driver" placeholder="Driver ID">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Used when creating dataset</small>
+                </div>
+                <div class="form-group">
+                    <label>Link Base URL</label>
+                    <input type="text" id="linkBaseUrl" value="http://34.140.193.179/s/pd_datfs2/stress-test" placeholder="Link Base URL">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Base URL for link items</small>
+                </div>
+                <div class="form-group">
+                    <label>Pipeline Name</label>
+                    <input type="text" id="pipelineName" value="stress-test-resnet-v11" placeholder="Pipeline name">
+                </div>
+                <div class="form-group">
+                    <label>Num Workers</label>
+                    <input type="number" id="numWorkers" value="50" min="1" max="100">
+                </div>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-run-all" id="runAllBtn" onclick="runFullWorkflow()">
+                    🚀 Run Full Workflow
+                </button>
+                <button class="btn btn-secondary" id="clearLogsBtn" onclick="clearLogs()">
+                    🗑️ Clear Logs
+                </button>
+                <button class="btn btn-secondary" id="clearCacheBtn" onclick="clearSavedWorkflows(); clearLogs();" title="Clear saved workflow data">
+                    🗄️ Clear Cache
+                </button>
+                <span class="status-indicator idle" id="statusIndicator">Idle</span>
+            </div>
+
+            <div class="progress-bar" id="progressBar" style="display: none;">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+        </div>
+
+        <!-- Log Display -->
+        <div class="card">
+            <h2>Execution Logs <span style="font-size: 12px; font-weight: normal; color: var(--text-muted);" id="logCount">(0 entries)</span></h2>
+            <div class="log-container" id="logContainer">
+                <div class="log-entry info">Ready to run workflow. Click "Run Full Workflow" to start.</div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Execution Flow</h2>
+            <div class="exec-flow">
+                <div class="flow-box" id="step1"><div class="icon">📥</div><div class="label">Download Images</div></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box" id="step2"><div class="icon">🔗</div><div class="label">Link Items</div></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box" id="step3"><div class="icon">⚙️</div><div class="label">Create Pipeline</div></div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-box" id="step4"><div class="icon">▶️</div><div class="label">Execute Batch</div></div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2><span class="method-badge method-recommended">RECOMMENDED</span>Execute Batch on Entire Dataset</h2>
+            <p style="margin-bottom: 16px; color: var(--text-secondary);">Uses Piper's batch execution command to efficiently run the pipeline on all dataset items.</p>
+            
+            <div class="api-info">
+                <strong>API Endpoint:</strong> <code>POST /pipelines/{pipelineId}/execute</code><br>
+                <strong>How it works:</strong> Piper creates a GenerateExecutionsCmd that fetches items in batches and triggers pipeline cycles for each item.
+            </div>
+
+            <h3>Python SDK (Simplest)</h3>
+            <div class="code-block">import dtlpy as dl
+
+dl.setenv('env2')  # Use dev-env 2
+dl.login()
+
+# Get resources
+project = dl.projects.get(project_id='&lt;PROJECT_ID&gt;')
+dataset = project.datasets.get(dataset_name='benchmark-images')
+pipeline = project.pipelines.get(pipeline_name='stress-test-sam2-pipeline')
+
+print(f"Dataset: {dataset.name} ({dataset.items_count} items)")
+print(f"Pipeline: {pipeline.name}")
+
+# Execute batch on entire dataset - this triggers all items!
+filters = dl.Filters(resource=dl.FiltersResource.ITEM)
+filters.add(field='hidden', values=False)
+filters.add(field='type', values='file')
+
+# This creates a command that processes all items in batches
+execution = pipeline.execute_batch(
+    filters=filters,
+    dataset_ids=[dataset.id]
+)
+
+print(f"Batch execution started!")
+print(f"Command ID: {execution.id}")</div>
+        </div>
+
+        <div class="card">
+            <h2>Pre-Execution Checklist</h2>
+            <ul class="checklist">
+                <li><span class="check-icon">✓</span>Compute setup completed (dev-env 2)</li>
+                <li><span class="check-icon">✓</span>Rubiks v1.41.1-rc.18 deployed</li>
+                <li><span class="check-icon">✓</span>Project and faasProxy dataset created</li>
+                <li><span class="check-icon">✓</span>Images downloaded to Filestore</li>
+                <li><span class="check-icon">✓</span>Link items created in dataset</li>
+                <li><span class="check-icon">✓</span>Pipeline created with ResNet function</li>
+                <li><span class="check-icon">✓</span>Monitoring dashboards ready</li>
+            </ul>
+        </div>
+
+        <div class="nav-buttons">
+            <a href="step5-pipeline.html" class="btn btn-secondary">← Back to Pipeline</a>
+            <a href="index.html" class="btn btn-primary">Back to Overview →</a>
+        </div>
+    </div>
+
+    <script>
+        // Use relative API paths - will be served by DPK custom server
+        const API_BASE_URL = window.location.origin;
+        let isRunning = false;
+        let currentExecutions = [];
+        let currentWorkflowId = null; // Track current workflow ID
+
+        // Track the progress line element for batch execution
+        let batchProgressLine = null;
+        
+        // localStorage keys
+        const STORAGE_KEY_WORKFLOWS = 'stress_test_workflows';
+        const STORAGE_KEY_CURRENT_WORKFLOW = 'stress_test_current_workflow';
+        
+        // Save workflow progress to localStorage
+        function saveWorkflowProgress(workflowId, progress) {
+            try {
+                // Save current workflow
+                if (workflowId) {
+                    localStorage.setItem(STORAGE_KEY_CURRENT_WORKFLOW, workflowId);
+                }
+                
+                // Get all saved workflows
+                const savedWorkflows = JSON.parse(localStorage.getItem(STORAGE_KEY_WORKFLOWS) || '{}');
+                
+                // Update with current progress
+                savedWorkflows[workflowId] = {
+                    ...progress,
+                    lastUpdated: Date.now(),
+                    workflowId: workflowId
+                };
+                
+                // Save back to localStorage
+                localStorage.setItem(STORAGE_KEY_WORKFLOWS, JSON.stringify(savedWorkflows));
+            } catch (e) {
+                console.error('Failed to save workflow progress:', e);
+            }
+        }
+        
+        // Load workflow progress from localStorage
+        function loadWorkflowProgress(workflowId) {
+            try {
+                const savedWorkflows = JSON.parse(localStorage.getItem(STORAGE_KEY_WORKFLOWS) || '{}');
+                return savedWorkflows[workflowId] || null;
+            } catch (e) {
+                console.error('Failed to load workflow progress:', e);
+                return null;
+            }
+        }
+        
+        // Get all saved workflows
+        function getAllSavedWorkflows() {
+            try {
+                return JSON.parse(localStorage.getItem(STORAGE_KEY_WORKFLOWS) || '{}');
+            } catch (e) {
+                console.error('Failed to load saved workflows:', e);
+                return {};
+            }
+        }
+        
+        // Restore workflow from localStorage
+        function restoreWorkflow(workflowId) {
+            const saved = loadWorkflowProgress(workflowId);
+            if (!saved) return false;
+            
+            // Restore UI state
+            updateProgress(saved.progress_pct || 0);
+            updateStatus(saved.status || 'unknown', saved.current_step || '');
+            
+            // Restore logs
+            clearLogs();
+            if (saved.logs && saved.logs.length > 0) {
+                saved.logs.forEach(log => {
+                    const level = log.level?.toLowerCase() || 'info';
+                    const step = log.step || null;
+                    addLog(`${step ? `[${step}] ` : ''}${log.message}`, level, step);
+                });
+            }
+            
+            // If workflow is still running, resume polling
+            if (saved.status === 'running' || saved.status === 'unknown') {
+                addLog(`🔄 Resuming workflow monitoring...`, 'info');
+                currentWorkflowId = workflowId;
+                pollWorkflowProgress(workflowId);
+            } else {
+                addLog(`📋 Loaded saved workflow result (${saved.status})`, 'info');
+            }
+            
+            return true;
+        }
+        
+        // Clear saved workflows
+        function clearSavedWorkflows() {
+            try {
+                localStorage.removeItem(STORAGE_KEY_WORKFLOWS);
+                localStorage.removeItem(STORAGE_KEY_CURRENT_WORKFLOW);
+                addLog('🗑️ Cleared saved workflow data', 'info');
+            } catch (e) {
+                console.error('Failed to clear saved workflows:', e);
+            }
+        }
+        
+        function addLog(message, level = 'info', step = null) {
+            const container = document.getElementById('logContainer');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${level}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            let html = `<span class="log-timestamp">[${timestamp}]</span>`;
+            if (step) {
+                html += `<span class="log-step">[${step}]</span>`;
+            }
+            html += message;
+            
+            entry.innerHTML = html;
+            container.appendChild(entry);
+            container.scrollTop = container.scrollHeight;
+            
+            // Update log count
+            const count = container.children.length;
+            document.getElementById('logCount').textContent = `(${count} entries)`;
+        }
+        
+        function updateBatchProgressLog(message, level = 'info', step = null) {
+            const container = document.getElementById('logContainer');
+            const timestamp = new Date().toLocaleTimeString();
+            let html = `<span class="log-timestamp">[${timestamp}]</span>`;
+            if (step) {
+                html += `<span class="log-step">[${step}]</span> `;
+            }
+            html += message;
+            
+            if (batchProgressLine && batchProgressLine.parentNode) {
+                // Update existing progress line in place
+                batchProgressLine.innerHTML = html;
+                batchProgressLine.className = `log-entry ${level}`;
+            } else {
+                // Create new progress line if it doesn't exist or was removed
+                const entry = document.createElement('div');
+                entry.className = `log-entry ${level}`;
+                entry.innerHTML = html;
+                container.appendChild(entry);
+                batchProgressLine = entry;
+                
+                // Update log count (don't count this as a new entry since it's updating)
+                // Actually, we should count it once when created
+                const count = container.children.length;
+                document.getElementById('logCount').textContent = `(${count} entries)`;
+            }
+            // Always scroll to bottom to see the latest progress
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        function clearBatchProgressLine() {
+            batchProgressLine = null;
+        }
+
+        function clearLogs() {
+            const container = document.getElementById('logContainer');
+            container.innerHTML = '';
+            document.getElementById('logCount').textContent = '(0 entries)';
+            clearBatchProgressLine();
+        }
+
+        function updateStatus(status, message = '') {
+            const indicator = document.getElementById('statusIndicator');
+            indicator.className = `status-indicator ${status}`;
+            indicator.textContent = message || status.charAt(0).toUpperCase() + status.slice(1);
+        }
+
+        function updateProgress(percent) {
+            const progressBar = document.getElementById('progressBar');
+            const progressFill = document.getElementById('progressFill');
+            progressBar.style.display = 'block';
+            progressFill.style.width = `${percent}%`;
+        }
+
+        function highlightStep(stepNum, active = false) {
+            const step = document.getElementById(`step${stepNum}`);
+            if (active) {
+                step.classList.add('highlight');
+            } else {
+                step.classList.remove('highlight');
+            }
+        }
+
+        async function runFullWorkflow() {
+            if (isRunning) {
+                addLog('Workflow is already running!', 'warning');
+                return;
+            }
+
+            isRunning = true;
+            const runBtn = document.getElementById('runAllBtn');
+            runBtn.disabled = true;
+            runBtn.textContent = '⏳ Running...';
+            
+            updateStatus('running', 'Running Workflow');
+            clearLogs();
+            clearBatchProgressLine();
+            addLog('Starting full stress test workflow...', 'info');
+            updateProgress(0);
+            currentWorkflowId = null; // Reset current workflow
+
+            const config = {
+                maxImages: parseInt(document.getElementById('maxImages').value),
+                datasetId: document.getElementById('datasetId').value,
+                driverId: document.getElementById('driverId').value,
+                linkBaseUrl: document.getElementById('linkBaseUrl').value,
+                pipelineName: document.getElementById('pipelineName').value,
+                // Project ID is optional - will be auto-detected from service
+                numWorkers: parseInt(document.getElementById('numWorkers').value)
+            };
+
+            try {
+                // Use the /api/run-full endpoint which handles all steps including dataset creation
+                addLog('Starting full workflow via /api/run-full endpoint...', 'info');
+                updateProgress(5);
+                
+                const response = await fetch(`${API_BASE_URL}/api/run-full`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+
+                const result = await response.json();
+                
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+
+                if (!result.workflow_id) {
+                    throw new Error('No workflow_id returned from server');
+                }
+
+                currentWorkflowId = result.workflow_id;
+                addLog(`✓ Workflow started: ${result.workflow_id}`, 'success');
+                updateStatus('running', 'Workflow Running');
+                updateProgress(5);
+                
+                // Poll for workflow progress
+                await pollWorkflowProgress(result.workflow_id);
+                
+            } catch (error) {
+                addLog(`❌ Error: ${error.message}`, 'error');
+                updateStatus('error', 'Failed');
+                console.error('Workflow error:', error);
+            } finally {
+                isRunning = false;
+                runBtn.disabled = false;
+                runBtn.textContent = '🚀 Run Full Workflow';
+            }
+        }
+
+        async function executeStep(functionName, executionInput, config) {
+            try {
+                // Call DPK API endpoint
+                const response = await fetch(`${API_BASE_URL}/api/execute`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        service_id: config.service_id,
+                        project_id: config.project_id,
+                        function_name: functionName,
+                        execution_input: executionInput
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                }
+
+                const result = await response.json();
+                
+                // Poll for execution status and logs
+                if (result.execution_id) {
+                    await pollExecutionLogs(result.execution_id, config);
+                }
+                
+                return result;
+            } catch (error) {
+                addLog(`❌ Error executing ${functionName}: ${error.message}`, 'error');
+                throw error;
+            }
+        }
+
+        async function pollWorkflowProgress(workflowId) {
+            let pollCount = 0;
+            const maxPolls = 3600; // Poll for up to 1 hour (3600 * 1 second)
+            let lastLogCount = 0;
+            
+            while (pollCount < maxPolls) {
+                try {
+                    const response = await fetch(`${API_BASE_URL}/api/workflow-progress/${workflowId}`, {
+                        method: 'GET',
+                        headers: { 'Content-Type': 'application/json' }
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 404) {
+                            addLog('⚠ Workflow not found - may have been cleared', 'warning');
+                            break;
+                        }
+                        throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+                    }
+
+                    const progress = await response.json();
+                    
+                    // Save progress to localStorage
+                    saveWorkflowProgress(workflowId, progress);
+                    
+                    // Update status
+                    const status = progress.status || 'unknown';
+                    const currentStep = progress.current_step || 'unknown';
+                    const progressPct = progress.progress_pct || 0;
+                    
+                    // Update progress bar
+                    updateProgress(progressPct);
+                    
+                    // Update status indicator
+                    if (status === 'completed') {
+                        updateStatus('success', 'Completed');
+                    } else if (status === 'failed') {
+                        updateStatus('error', 'Failed');
+                    } else {
+                        updateStatus('running', `${currentStep} (${progressPct}%)`);
+                    }
+                    
+                    // Add new logs (only new ones since last poll)
+                    // Special handling for batch execution progress - update in place
+                    const logs = progress.logs || [];
+                    if (logs.length > lastLogCount) {
+                        const newLogs = logs.slice(lastLogCount);
+                        newLogs.forEach(log => {
+                            const level = log.level?.toLowerCase() || 'info';
+                            const step = log.step || null;
+                            const message = log.message || '';
+                            
+                            // Check if this is a batch execution progress update
+                            // Update in place for ALL execute_pipeline_batch messages that look like progress updates
+                            const isProgressMessage = step === 'execute_pipeline_batch' && 
+                                (message.includes('Progress:') || 
+                                 message.includes('items completed') || 
+                                 message.includes('Success:') || 
+                                 message.includes('Failed:') ||
+                                 message.includes('In Progress:') ||
+                                 message.includes('Waiting for statistics') ||
+                                 message.includes('Polling') ||
+                                 message.includes('Elapsed:'));
+                            
+                            if (isProgressMessage) {
+                                // Update the progress line in place
+                                updateBatchProgressLog(message, level, step);
+                            } else {
+                                // Regular log entry - append new line
+                                addLog(`${step ? `[${step}] ` : ''}${message}`, level);
+                                // Clear batch progress line if we're moving to a different step
+                                if (step && step !== 'execute_pipeline_batch') {
+                                    clearBatchProgressLine();
+                                }
+                            }
+                        });
+                        lastLogCount = logs.length;
+                    }
+                    
+                    // Check if workflow is complete
+                    if (status === 'completed') {
+                        // Clear batch progress line when workflow completes
+                        clearBatchProgressLine();
+                        // Save final state
+                        saveWorkflowProgress(workflowId, progress);
+                        if (progress.result) {
+                            addLog('🎉 Full workflow completed successfully!', 'success');
+                            // Show summary
+                            if (progress.result.steps) {
+                                progress.result.steps.forEach(step => {
+                                    if (step.step && step.result) {
+                                        const stepResult = step.result;
+                                        if (stepResult.error) {
+                                            addLog(`  ${step.step}: ❌ ${stepResult.error}`, 'error');
+                                        } else if (step.step === 'download_images') {
+                                            addLog(`  ${step.step}: ✓ ${stepResult.downloaded || 0} downloaded, ${stepResult.actual_files_on_disk || 0} files on disk`, 'success');
+                                        } else if (step.step === 'create_link_items') {
+                                            addLog(`  ${step.step}: ✓ ${stepResult.created || 0} items created`, 'success');
+                                        } else if (step.step === 'create_pipeline') {
+                                            addLog(`  ${step.step}: ✓ Pipeline ${stepResult.pipeline_id} created`, 'success');
+                                        } else if (step.step === 'execute_pipeline_batch') {
+                                            addLog(`  ${step.step}: ✓ Batch started on ${stepResult.items_count || 0} items`, 'success');
+                                        }
+                                    }
+                                });
+                            }
+                        } else {
+                            addLog('✓ Workflow completed', 'success');
+                        }
+                        break;
+                    } else if (status === 'failed') {
+                        // Clear batch progress line when workflow fails
+                        clearBatchProgressLine();
+                        // Save final state
+                        saveWorkflowProgress(workflowId, progress);
+                        const errorMsg = progress.error || 'Unknown error';
+                        addLog(`✗ Workflow failed: ${errorMsg}`, 'error');
+                        break;
+                    }
+                } catch (error) {
+                    addLog(`Polling error: ${error.message}`, 'warning');
+                }
+                
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Wait 1 second
+                pollCount++;
+            }
+            
+            if (pollCount >= maxPolls) {
+                addLog('⚠ Polling timeout - workflow may still be running', 'warning');
+            }
+        }
+
+        // Check backend server status on load
+        window.addEventListener('load', async () => {
+            // Check server connection
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/health`);
+                if (response.ok) {
+                    addLog('✓ DPK server connected', 'success');
+                }
+            } catch (error) {
+                addLog('⚠️ Could not connect to DPK server', 'warning');
+            }
+            
+            // Restore workflow from localStorage
+            try {
+                const savedWorkflowId = localStorage.getItem('stress_test_current_workflow');
+                if (savedWorkflowId) {
+                    const saved = loadWorkflowProgress(savedWorkflowId);
+                    if (saved) {
+                        if (saved.status === 'running' || saved.status === 'unknown') {
+                            // Workflow might still be running, restore and resume polling
+                            setTimeout(() => {
+                                addLog('📋 Found saved workflow, restoring and resuming monitoring...', 'info');
+                                restoreWorkflow(savedWorkflowId);
+                            }, 1000);
+                        } else {
+                            // Workflow is completed, just show the result
+                            setTimeout(() => {
+                                addLog('📋 Found saved workflow result', 'info');
+                                restoreWorkflow(savedWorkflowId);
+                            }, 1000);
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to restore workflow:', e);
+            }
+        });
+    </script>
+</body>
+</html>

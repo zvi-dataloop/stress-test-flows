@@ -1,0 +1,88 @@
+{
+  "name": "nginx-stress-test",
+  "displayName": "Nginx Stress-Test Benchmark",
+  "version": "1.0.1",
+  "scope": "public",
+  "attributes": {
+    "Provider": "Other",
+    "Category": "Application"
+  },
+  "description": "Stress test benchmark app with API to create datasets, pipelines, and execute batch tests",
+  "components": {
+    "panels": [
+      {
+        "name": "stress-test-panel",
+        "icon": "icon-dl-qa-sampling",
+        "supportedSlots": [
+          {
+            "type": "floatingWindow",
+            "configuration": {
+              "layout": {
+                "width": 1200,
+                "height": 800,
+                "resizable": true
+              }
+            }
+          }
+        ],
+        "conditions": {
+          "resources": []
+        },
+        "metadata": {
+          "indexPage": "index.html"
+        }
+      }
+    ],
+    "modules": [
+      {
+        "name": "stress-test-server",
+        "entryPoint": "main.py",
+        "className": "StressTestServer",
+        "config": {
+          "isCustomServer": true
+        },
+        "initInputs": [],
+        "functions": [
+          {
+            "name": "run",
+            "input": [],
+            "output": []
+          }
+        ]
+      }
+    ],
+    "services": [
+      {
+        "name": "stress-test-ui-service",
+        "moduleName": "stress-test-server",
+        "runtime": {
+          "podType": "regular-xs",
+          "concurrency": 1,
+          "autoscaler": {
+            "type": "rabbitmq",
+            "minReplicas": 1,
+            "maxReplicas": 1
+          }
+        },
+        "panelNames": ["stress-test-panel"],
+        "initParams": {}
+      }
+    ],
+    "toolbars": [
+      {
+        "name": "stress-test-toolbar",
+        "displayName": "Nginx Stress-Test",
+        "icon": "icon-dl-qa-sampling",
+        "tooltip": "Open Nginx Stress-Test Benchmark",
+        "invoke": {
+          "type": "panel",
+          "namespace": "stress-test-panel"
+        },
+        "conditions": {
+          "resources": []
+        },
+        "location": "projectSideMenu"
+      }
+    ]
+  }
+}

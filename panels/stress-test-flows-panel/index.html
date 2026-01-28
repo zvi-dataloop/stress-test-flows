@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nginx Stress-Test Benchmark - Process Flows</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #ffffff;
+            --bg-secondary: #f8fafc;
+            --bg-tertiary: #f1f5f9;
+            --bg-card: #ffffff;
+            --accent-primary: #0ea5e9;
+            --accent-secondary: #6366f1;
+            --accent-success: #10b981;
+            --accent-warning: #f59e0b;
+            --accent-danger: #ef4444;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --gradient-1: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            min-height: 100vh;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        header { text-align: center; margin-bottom: 48px; }
+
+        .logo {
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--gradient-1);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: white;
+        }
+
+        .logo-text {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+
+        h1 {
+            font-size: 42px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            background: var(--gradient-1);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .subtitle {
+            font-size: 18px;
+            color: var(--text-secondary);
+            max-width: 700px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        .env-banner {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px 32px;
+            margin-bottom: 40px;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .env-banner h3 {
+            font-size: 14px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 16px;
+        }
+
+        .env-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 20px;
+        }
+
+        .env-item {
+            text-align: center;
+        }
+
+        .env-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .env-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--accent-primary);
+        }
+
+        .flow-nav {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            margin-bottom: 40px;
+            flex-wrap: wrap;
+        }
+
+        .nav-pill {
+            padding: 10px 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 100px;
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-weight: 500;
+            font-size: 14px;
+            transition: all 0.2s ease;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .nav-pill:hover {
+            border-color: var(--accent-primary);
+            color: var(--accent-primary);
+            transform: translateY(-1px);
+        }
+
+        .nav-pill.active {
+            background: var(--gradient-1);
+            border-color: transparent;
+            color: white;
+        }
+
+        .master-flow {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 32px;
+            margin-bottom: 40px;
+            box-shadow: var(--shadow-md);
+        }
+
+        .master-flow h2 {
+            font-size: 20px;
+            margin-bottom: 24px;
+            color: var(--text-primary);
+        }
+
+        .flow-diagram {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            overflow-x: auto;
+            padding: 16px 0;
+        }
+
+        .flow-step { display: flex; flex-direction: column; align-items: center; min-width: 120px; }
+
+        .step-box {
+            width: 110px;
+            height: 80px;
+            background: var(--bg-tertiary);
+            border: 2px solid var(--border-color);
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 4px;
+            transition: all 0.2s ease;
+        }
+
+        .step-box:hover {
+            border-color: var(--accent-primary);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow-md);
+        }
+
+        .step-icon { font-size: 22px; }
+        .step-label { font-size: 11px; font-weight: 600; text-align: center; color: var(--text-secondary); padding: 0 4px; }
+
+        .flow-arrow { font-size: 24px; color: var(--accent-primary); }
+
+        .overview-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 40px;
+        }
+
+        .flow-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            transition: all 0.2s ease;
+            cursor: pointer;
+            text-decoration: none;
+            color: inherit;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .flow-card:hover {
+            transform: translateY(-4px);
+            box-shadow: var(--shadow-lg);
+            border-color: var(--accent-primary);
+        }
+
+        .flow-card-header {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            margin-bottom: 14px;
+        }
+
+        .flow-number {
+            width: 40px;
+            height: 40px;
+            background: var(--gradient-1);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            font-weight: 700;
+            color: white;
+            flex-shrink: 0;
+        }
+
+        .flow-title { font-size: 16px; font-weight: 600; margin-bottom: 2px; }
+        .flow-subtitle { font-size: 12px; color: var(--text-muted); }
+        .flow-description { color: var(--text-secondary); line-height: 1.6; font-size: 13px; margin-bottom: 14px; }
+
+        .flow-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+
+        .tag {
+            padding: 4px 10px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-size: 10px;
+            font-weight: 600;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .tag.gcp { color: #4285f4; background: rgba(66, 133, 244, 0.1); }
+        .tag.k8s { color: #326ce5; background: rgba(50, 108, 229, 0.1); }
+        .tag.nginx { color: var(--accent-success); background: rgba(16, 185, 129, 0.1); }
+        .tag.pipeline { color: var(--accent-secondary); background: rgba(99, 102, 241, 0.1); }
+        .tag.sdk { color: var(--accent-warning); background: rgba(245, 158, 11, 0.1); }
+
+        .btn-group {
+            display: flex;
+            gap: 16px;
+            margin-top: 40px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            padding: 14px 28px;
+            border-radius: 12px;
+            font-size: 15px;
+            font-weight: 600;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--gradient-1);
+            color: white;
+            box-shadow: 0 4px 14px rgba(14, 165, 233, 0.3);
+        }
+
+        .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(14, 165, 233, 0.4); }
+
+        .btn-secondary {
+            background: var(--bg-card);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+
+        footer {
+            text-align: center;
+            margin-top: 48px;
+            padding-top: 32px;
+            border-top: 1px solid var(--border-color);
+            color: var(--text-muted);
+            font-size: 14px;
+        }
+
+        @media (max-width: 768px) {
+            h1 { font-size: 28px; }
+            .flow-diagram { flex-direction: column; }
+            .flow-arrow { transform: rotate(90deg); }
+        }
+    </style>
+</head>
+<body>
+    <script
+      type="text/javascript"
+      src="https://console.dataloop.ai/dlAppLib.js"
+    ></script>
+    <script>
+		dl.init()
+    </script>
+    <div class="container" style="height: 100vh; overflow-y: scroll;">
+        <header>
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <span class="logo-text">Dataloop FaaS</span>
+            </div>
+            <h1>Nginx Stress-Test Benchmark</h1>
+            <p class="subtitle">End-to-end process flows for stress testing nginx gateway on GCP FaaS with SAM2 pipeline execution</p>
+        </header>
+
+        <div class="env-banner">
+            <h3>Environment Configuration - dev-env 2</h3>
+            <div class="env-grid">
+                <div class="env-item">
+                    <div class="env-label">Cloud Provider</div>
+                    <div class="env-value">GCP</div>
+                </div>
+                <div class="env-item">
+                    <div class="env-label">Storage</div>
+                    <div class="env-value">Filestore</div>
+                </div>
+                <div class="env-item">
+                    <div class="env-label">Rubiks Version</div>
+                    <div class="env-value">v1.41.1-rc.18</div>
+                </div>
+                <div class="env-item">
+                    <div class="env-label">Piper Version</div>
+                    <div class="env-value">sprint40</div>
+                </div>
+                <div class="env-item">
+                    <div class="env-label">Serve-Agent</div>
+                    <div class="env-value">1.1.1-obf.0</div>
+                </div>
+                <div class="env-item">
+                    <div class="env-label">Scaler Version</div>
+                    <div class="env-value">1.101.0-rc.4-prom-scale-2-nginx</div>
+                </div>
+            </div>
+        </div>
+
+        <nav class="flow-nav">
+            <a href="index.html" class="nav-pill active">Overview</a>
+            <a href="step1-compute-setup.html" class="nav-pill">Compute Setup</a>
+            <a href="step2-project.html" class="nav-pill">Project & Dataset</a>
+            <a href="step3-download-images.html" class="nav-pill">Download Images</a>
+            <a href="step4-link-items.html" class="nav-pill">Link Items</a>
+            <a href="step5-pipeline.html" class="nav-pill">Pipeline</a>
+            <a href="step6-execute.html" class="nav-pill">Execute</a>
+        </nav>
+
+        <section class="master-flow">
+            <h2>Master Process Flow</h2>
+            <div class="flow-diagram">
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">⚙️</span>
+                        <span class="step-label">Compute Setup</span>
+                    </div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">📁</span>
+                        <span class="step-label">Project & Dataset</span>
+                    </div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">⬇️</span>
+                        <span class="step-label">Download Images</span>
+                    </div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">🔗</span>
+                        <span class="step-label">Create Link Items</span>
+                    </div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">🔄</span>
+                        <span class="step-label">Create Pipeline</span>
+                    </div>
+                </div>
+                <span class="flow-arrow">→</span>
+                <div class="flow-step">
+                    <div class="step-box">
+                        <span class="step-icon">▶️</span>
+                        <span class="step-label">Run Cycles</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="overview-grid">
+            <a href="step1-compute-setup.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">1</div>
+                    <div>
+                        <h3 class="flow-title">Compute Setup</h3>
+                        <span class="flow-subtitle">dataloop-ai/compute-setup</span>
+                    </div>
+                </div>
+                <p class="flow-description">Run the compute-setup script to configure and connect the Kubernetes cluster for FaaS workloads.</p>
+                <div class="flow-tags">
+                    <span class="tag gcp">GCP</span>
+                    <span class="tag k8s">GKE</span>
+                    <span class="tag">compute-setup</span>
+                </div>
+            </a>
+
+            <a href="step2-project.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">2</div>
+                    <div>
+                        <h3 class="flow-title">Project & Dataset</h3>
+                        <span class="flow-subtitle">Create in Organization</span>
+                    </div>
+                </div>
+                <p class="flow-description">Create a project in the org and set up the faasProxy dataset for storing link items.</p>
+                <div class="flow-tags">
+                    <span class="tag sdk">dtlpy SDK</span>
+                    <span class="tag">Project</span>
+                    <span class="tag">Dataset</span>
+                </div>
+            </a>
+
+            <a href="step3-download-images.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">3</div>
+                    <div>
+                        <h3 class="flow-title">Download Images</h3>
+                        <span class="flow-subtitle">Public Dataset to Filestore</span>
+                    </div>
+                </div>
+                <p class="flow-description">Use a script/app to download public dataset images directly to GCP Filestore storage.</p>
+                <div class="flow-tags">
+                    <span class="tag">Filestore</span>
+                    <span class="tag">COCO/ImageNet</span>
+                    <span class="tag gcp">GCP</span>
+                </div>
+            </a>
+
+            <a href="step4-link-items.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">4</div>
+                    <div>
+                        <h3 class="flow-title">Create Link Items</h3>
+                        <span class="flow-subtitle">faasProxy Dataset</span>
+                    </div>
+                </div>
+                <p class="flow-description">Create link items in the faasProxy dataset for each downloaded image in Filestore.</p>
+                <div class="flow-tags">
+                    <span class="tag sdk">dtlpy SDK</span>
+                    <span class="tag">LinkItem</span>
+                    <span class="tag">faasProxy</span>
+                </div>
+            </a>
+
+            <a href="step5-pipeline.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">5</div>
+                    <div>
+                        <h3 class="flow-title">Create Pipeline</h3>
+                        <span class="flow-subtitle">SAM2 Function Integration</span>
+                    </div>
+                </div>
+                <p class="flow-description">Create the stress-test pipeline with SAM2 function node for image segmentation.</p>
+                <div class="flow-tags">
+                    <span class="tag pipeline">Pipeline</span>
+                    <span class="tag">SAM2</span>
+                    <span class="tag">ML</span>
+                </div>
+            </a>
+
+            <a href="step6-execute.html" class="flow-card">
+                <div class="flow-card-header">
+                    <div class="flow-number">6</div>
+                    <div>
+                        <h3 class="flow-title">Execute Pipeline Cycles</h3>
+                        <span class="flow-subtitle">Run on Entire Dataset</span>
+                    </div>
+                </div>
+                <p class="flow-description">Execute pipeline cycles on all dataset items to stress test nginx gateway and FaaS infrastructure.</p>
+                <div class="flow-tags">
+                    <span class="tag">Execution</span>
+                    <span class="tag nginx">Nginx</span>
+                    <span class="tag">Stress Test</span>
+                </div>
+            </a>
+        </section>
+
+        <div class="btn-group">
+            <a href="step1-compute-setup.html" class="btn btn-primary">Start with Step 1 →</a>
+            <a href="architecture.html" class="btn btn-secondary">View Architecture</a>
+        </div>
+
+        <footer>
+            <p>Nginx Stress-Test Benchmark • Dataloop FaaS Platform • GCP dev-env 2</p>
+        </footer>
+    </div>
+</body>
+</html>

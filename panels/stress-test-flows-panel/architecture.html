@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Architecture - Nginx Stress-Test</title>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #ffffff; --bg-secondary: #f8fafc; --bg-tertiary: #f1f5f9; --bg-card: #ffffff;
+            --accent-primary: #0ea5e9; --accent-secondary: #6366f1; --accent-success: #10b981; --accent-warning: #f59e0b;
+            --text-primary: #0f172a; --text-secondary: #475569; --text-muted: #94a3b8;
+            --border-color: #e2e8f0;
+            --gradient-1: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05); --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg-secondary); color: var(--text-primary); min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 40px 24px; }
+        .breadcrumb { display: flex; gap: 8px; margin-bottom: 32px; font-size: 14px; color: var(--text-muted); }
+        .breadcrumb a { color: var(--accent-primary); text-decoration: none; }
+        h1 { font-size: 36px; font-weight: 700; margin-bottom: 8px; background: var(--gradient-1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .subtitle { font-size: 16px; color: var(--text-secondary); margin-bottom: 40px; }
+
+        .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; margin-bottom: 24px; box-shadow: var(--shadow-sm); }
+        .card h2 { font-size: 18px; margin-bottom: 20px; color: var(--text-primary); }
+
+        .arch-diagram { background: var(--bg-tertiary); border-radius: 16px; padding: 32px; }
+        .arch-layer { margin-bottom: 24px; }
+        .layer-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 10px; padding-left: 8px; }
+        .layer-content { display: flex; align-items: center; justify-content: center; gap: 16px; flex-wrap: wrap; }
+        .arch-box { background: var(--bg-card); border: 2px solid var(--border-color); border-radius: 12px; padding: 16px 28px; text-align: center; min-width: 120px; transition: all 0.2s; }
+        .arch-box:hover { border-color: var(--accent-primary); transform: translateY(-2px); }
+        .arch-box .icon { font-size: 28px; margin-bottom: 6px; }
+        .arch-box .label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+        .arch-box.nginx { border-color: var(--accent-success); background: rgba(16, 185, 129, 0.05); }
+        .arch-box.serve { border-color: var(--accent-primary); background: rgba(14, 165, 233, 0.05); }
+        .arch-box.sam2 { border-color: var(--accent-secondary); background: rgba(99, 102, 241, 0.05); }
+        .arch-box.storage { border-color: var(--accent-warning); background: rgba(245, 158, 11, 0.05); }
+        .arch-arrow { font-size: 20px; color: var(--accent-primary); }
+        .arch-arrow.down { display: block; text-align: center; margin: 12px 0; }
+
+        .component-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+        .component-card { background: var(--bg-tertiary); border-radius: 12px; padding: 20px; }
+        .component-card h3 { font-size: 15px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+        .component-card p { font-size: 13px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 14px; }
+        .specs { display: flex; flex-direction: column; gap: 6px; }
+        .spec-row { display: flex; justify-content: space-between; font-size: 12px; padding: 8px 10px; background: var(--bg-card); border-radius: 6px; }
+        .spec-label { color: var(--text-muted); }
+        .spec-value { font-family: 'JetBrains Mono', monospace; color: var(--accent-primary); }
+
+        .nav-buttons { display: flex; justify-content: center; margin-top: 40px; }
+        .btn { padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none; background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+    </style>
+</head>
+<body>
+    <div class="container" style="height: 100vh; overflow-y: scroll;">
+        <div class="breadcrumb"><a href="index.html">Overview</a><span>›</span><span>Architecture</span></div>
+        <h1>System Architecture</h1>
+        <p class="subtitle">Infrastructure diagram for nginx stress-test on GCP dev-env 2</p>
+
+        <div class="card">
+            <h2>Request Flow Architecture</h2>
+            <div class="arch-diagram">
+                <div class="arch-layer">
+                    <div class="layer-label">External</div>
+                    <div class="layer-content">
+                        <div class="arch-box"><div class="icon">🌐</div><div class="label">Pipeline Execution</div></div>
+                        <span class="arch-arrow">→</span>
+                        <div class="arch-box"><div class="icon">⚖️</div><div class="label">GCP Load Balancer</div></div>
+                    </div>
+                </div>
+                <div class="arch-arrow down">↓</div>
+                <div class="arch-layer">
+                    <div class="layer-label">Gateway Layer</div>
+                    <div class="layer-content">
+                        <div class="arch-box nginx"><div class="icon">🔷</div><div class="label">Nginx Gateway</div></div>
+                    </div>
+                </div>
+                <div class="arch-arrow down">↓</div>
+                <div class="arch-layer">
+                    <div class="layer-label">Service Layer</div>
+                    <div class="layer-content">
+                        <div class="arch-box serve"><div class="icon">📦</div><div class="label">Serve Agent 1</div></div>
+                        <div class="arch-box serve"><div class="icon">📦</div><div class="label">Serve Agent 2</div></div>
+                        <div class="arch-box serve"><div class="icon">📦</div><div class="label">Serve Agent N</div></div>
+                    </div>
+                </div>
+                <div class="arch-arrow down">↓</div>
+                <div class="arch-layer">
+                    <div class="layer-label">Compute & Storage</div>
+                    <div class="layer-content">
+                        <div class="arch-box sam2"><div class="icon">🤖</div><div class="label">SAM2 Function</div></div>
+                        <div class="arch-box storage"><div class="icon">📁</div><div class="label">GCP Filestore</div></div>
+                        <div class="arch-box"><div class="icon">🔗</div><div class="label">faasProxy Dataset</div></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Component Specifications</h2>
+            <div class="component-grid">
+                <div class="component-card">
+                    <h3>🔷 Nginx Gateway</h3>
+                    <p>High-performance reverse proxy with rate limiting.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Port</span><span class="spec-value">80 → 8080</span></div>
+                        <div class="spec-row"><span class="spec-label">Workers</span><span class="spec-value">auto</span></div>
+                        <div class="spec-row"><span class="spec-label">Connections</span><span class="spec-value">4096/worker</span></div>
+                    </div>
+                </div>
+                <div class="component-card">
+                    <h3>📦 Serve Agent</h3>
+                    <p>FaaS execution agent for file serving and functions.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Version</span><span class="spec-value">1.1.1-obf.0</span></div>
+                        <div class="spec-row"><span class="spec-label">Port</span><span class="spec-value">8080</span></div>
+                        <div class="spec-row"><span class="spec-label">Scaling</span><span class="spec-value">2-50 pods</span></div>
+                    </div>
+                </div>
+                <div class="component-card">
+                    <h3>🤖 SAM2 Function</h3>
+                    <p>Segment Anything Model 2 for image segmentation.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">ML Function</span></div>
+                        <div class="spec-row"><span class="spec-label">GPU</span><span class="spec-value">Required</span></div>
+                        <div class="spec-row"><span class="spec-label">Input</span><span class="spec-value">Image Item</span></div>
+                    </div>
+                </div>
+                <div class="component-card">
+                    <h3>📁 GCP Filestore</h3>
+                    <p>Network file storage for test images.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">Filestore</span></div>
+                        <div class="spec-row"><span class="spec-label">Mount</span><span class="spec-value">/mnt/filestore</span></div>
+                        <div class="spec-row"><span class="spec-label">Access</span><span class="spec-value">via LinkItem</span></div>
+                    </div>
+                </div>
+                <div class="component-card">
+                    <h3>⚡ HPA Scaler</h3>
+                    <p>Auto-scaling controller for dynamic pod management.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Version</span><span class="spec-value">1.101.0-rc.4</span></div>
+                        <div class="spec-row"><span class="spec-label">Min/Max</span><span class="spec-value">2 / 50</span></div>
+                        <div class="spec-row"><span class="spec-label">CPU Target</span><span class="spec-value">70%</span></div>
+                    </div>
+                </div>
+                <div class="component-card">
+                    <h3>🔗 faasProxy Dataset</h3>
+                    <p>Dataset with LinkItems referencing Filestore images.</p>
+                    <div class="specs">
+                        <div class="spec-row"><span class="spec-label">Driver</span><span class="spec-value">faasProxy</span></div>
+                        <div class="spec-row"><span class="spec-label">Items</span><span class="spec-value">LinkItem</span></div>
+                        <div class="spec-row"><span class="spec-label">Trigger</span><span class="spec-value">Pipeline</span></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="nav-buttons">
+            <a href="index.html" class="btn">← Back to Overview</a>
+        </div>
+    </div>
+</body>
+</html>

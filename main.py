@@ -1,0 +1,2933 @@
+"""
+Nginx Stress-Test Benchmark Server
+Custom server that serves HTML documentation and provides API for stress testing.
+Combines UI server and stress test execution in one service.
+"""
+
+import os
+import json
+import logging
+import time
+import threading
+from threading import Thread
+import zipfile
+import io
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
+import dtlpy as dl
+import requests
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('stress-test-server')
+
+# Static files directory
+STATIC_DIR = os.path.join(os.path.dirname(__file__), 'panels', 'stress-test-flows-panel')
+
+# Default Configuration for stress test execution
+DEFAULT_STORAGE_BASE_PATH = '/s/pd_datfs2/stress-test' 
+DEFAULT_LINK_BASE_URL = 'http://34.140.193.179/s/pd_datfs2/stress-test'
+DEFAULT_DATASET_ID = ''
+
+# COCO dataset URLs
+COCO_TRAIN2017_BASE_URL = "http://images.cocodataset.org/train2017/"
+COCO_VAL2017_BASE_URL = "http://images.cocodataset.org/val2017/"
+
+# Cache for COCO image list
+_coco_image_cache = None
+
+# Store execution logs and status
+execution_logs = {}
+execution_status = {}
+
+# Store workflow progress for real-time updates
+workflow_progress = {}  # workflow_id -> {status, current_step, progress_pct, logs, result, error}
+
+# Global reference to the server instance (set by StressTestServer.__init__)
+_stress_test_server_instance = None
+
+
+def get_coco_images(dataset: str = 'all'):
+    """
+    Get COCO image URLs.
+    
+    Args:
+        dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
+    
+    Returns:
+        list of image URLs
+    """
+    global _coco_image_cache
+    
+    if _coco_image_cache is not None:
+        logger.info(f"Using cached image list: {len(_coco_image_cache)} images")
+        return _coco_image_cache
+    
+    logger.info(f"Loading COCO image list (dataset={dataset})...")
+    
+    train_ids = []
+    val_ids = []
+    
+    # Try to load from bundled file (coco_all_ids.json)
+    bundled_file = os.path.join(os.path.dirname(__file__), '..', 'service', 'coco_all_ids.json')
+    if os.path.exists(bundled_file):
+        try:
+            with open(bundled_file, 'r') as f:
+                data = json.load(f)
+            train_ids = data.get('train2017', [])
+            val_ids = data.get('val2017', [])
+            logger.info(f"Loaded from bundled file: {len(train_ids)} train, {len(val_ids)} val")
+        except Exception as e:
+            logger.error(f"Failed to load bundled file: {e}")
+    
+    # Fallback to old val-only file
+    if not train_ids and not val_ids:
+        old_bundled = os.path.join(os.path.dirname(__file__), '..', 'service', 'coco_val2017_ids.json')
+        if os.path.exists(old_bundled):
+            try:
+                with open(old_bundled, 'r') as f:
+                    val_ids = json.load(f)
+                logger.info(f"Loaded {len(val_ids)} val IDs from old bundled file")
+            except:
+                pass
+    
+    # Fallback: download annotations
+    if not train_ids and not val_ids:
+        logger.info("Bundled files not found, downloading annotations (~250MB)...")
+        try:
+            url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
+            response = requests.get(url, timeout=600)
+            response.raise_for_status()
+            
+            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+                with z.open('annotations/instances_train2017.json') as f:
+                    train_annotations = json.load(f)
+                with z.open('annotations/instances_val2017.json') as f:
+                    val_annotations = json.load(f)
+            
+            train_ids = [img['id'] for img in train_annotations.get('images', [])]
+            val_ids = [img['id'] for img in val_annotations.get('images', [])]
+            logger.info(f"Downloaded: {len(train_ids)} train, {len(val_ids)} val")
+            
+        except Exception as e:
+            logger.error(f"Failed to download annotations: {e}")
+    
+    # Build URL list based on dataset selection
+    urls = []
+    if dataset in ['train2017', 'all']:
+        urls.extend([f"{COCO_TRAIN2017_BASE_URL}{str(img_id).zfill(12)}.jpg" for img_id in train_ids])
+    if dataset in ['val2017', 'all']:
+        urls.extend([f"{COCO_VAL2017_BASE_URL}{str(img_id).zfill(12)}.jpg" for img_id in val_ids])
+    
+    if not urls:
+        logger.warning("No images found, using minimal fallback")
+        urls = [f"{COCO_VAL2017_BASE_URL}{str(i).zfill(12)}.jpg" for i in [397133, 37777, 252219, 87038, 174482]]
+    
+    logger.info(f"Total: {len(urls)} COCO image URLs available")
+    _coco_image_cache = urls
+    return urls
+
+
+class StressTestHandler(SimpleHTTPRequestHandler):
+    """HTTP handler for stress test server"""
+    
+    def __init__(self, *args, **kwargs):
+        # Don't use directory parameter - we'll handle paths manually
+        super().__init__(*args, **kwargs)
+
+    
+    def do_GET(self):
+        """Handle GET requests"""
+        parsed = urlparse(self.path)
+        path = parsed.path
+        
+        logger.info(f"GET request received: {path} (full path: {self.path})")
+        
+        # Normalize path - handle multiple possible formats
+        original_path = path
+        
+        # Remove common prefixes that might be added by Dataloop/Tornado
+        # Handle: /stress-test-panel/, /panels/stress-test-panel/, /api/v1/apps/.../panels/stress-test-panel/
+        prefixes_to_remove = [
+            '/api/v1/apps/nginx-stress-test-flows-env2/panels/stress-test-panel',
+            '/api/v1/apps/nginx-stress-test-flows-env2/panels',
+            '/panels/stress-test-panel',
+            '/stress-test-panel'
+        ]
+        
+        for prefix in prefixes_to_remove:
+            if path.startswith(prefix + '/'):
+                path = path[len(prefix):]
+                logger.info(f"Removed prefix '{prefix}': {original_path} -> {path}")
+                break
+            elif path == prefix:
+                path = '/'
+                logger.info(f"Matched exact prefix '{prefix}': {original_path} -> {path}")
+                break
+        
+        # API endpoints - check after prefix removal
+        if path == '/api/health' or path.startswith('/api/health'):
+            logger.info("Serving /api/health")
+            self._send_json({'status': 'ok', 'service': 'stress-test-server'})
+        elif path == '/api/project' or path.startswith('/api/project'):
+            self._get_project_info()
+        elif path == '/api/datasets' or path.startswith('/api/datasets'):
+            self._list_datasets()
+        elif path == '/api/pipelines' or path.startswith('/api/pipelines'):
+            self._list_pipelines()
+        elif path.startswith('/api/logs/'):
+            execution_id = path.split('/')[-1]
+            self._get_execution_logs(execution_id)
+        elif path.startswith('/api/execution/'):
+            execution_id = path.split('/')[-1]
+            self._get_execution_status(execution_id)
+        elif path.startswith('/api/workflow-progress/'):
+            workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
+            self._get_workflow_progress(workflow_id)
+        else:
+            # Handle static file paths
+            # Ensure root path serves index.html
+            if path == '/' or path == '':
+                path = '/index.html'
+                logger.info(f"Root path, serving index.html")
+            
+            logger.info(f"Serving static file: {path} (from original: {original_path})")
+            # Serve static files
+            self._serve_static_file(path)
+    
+    def _serve_static_file(self, path):
+        """Serve static files with proper path handling"""
+        try:
+            logger.info(f"_serve_static_file called with path: {path}")
+            logger.info(f"STATIC_DIR: {STATIC_DIR}")
+            logger.info(f"STATIC_DIR exists: {os.path.exists(STATIC_DIR)}")
+            
+            # Handle root path or index.html
+            if path == '/' or path == '' or path == '/index.html':
+                file_path = os.path.join(STATIC_DIR, 'index.html')
+                logger.info(f"Root/index path, serving: {file_path}")
+            else:
+                # Remove leading slash
+                clean_path = path.lstrip('/')
+                
+                # Remove any remaining prefixes (defensive - shouldn't be here after do_GET processing)
+                prefixes_to_clean = ['stress-test-panel/', 'panels/stress-test-panel/']
+                for prefix in prefixes_to_clean:
+                    if clean_path.startswith(prefix):
+                        clean_path = clean_path[len(prefix):]
+                        logger.info(f"Removed prefix '{prefix}' from clean_path: {clean_path}")
+                
+                if clean_path == '':
+                    clean_path = 'index.html'
+                
+                file_path = os.path.join(STATIC_DIR, clean_path)
+                logger.info(f"Resolved file path: {path} -> {clean_path} -> {file_path}")
+            
+            # Normalize path to prevent directory traversal
+            file_path = os.path.normpath(file_path)
+            
+            # Ensure it's within STATIC_DIR
+            static_dir_norm = os.path.normpath(STATIC_DIR)
+            if not file_path.startswith(static_dir_norm):
+                logger.warning(f"Path traversal attempt: {path} -> {file_path}")
+                self._send_error(403, 'Forbidden')
+                return
+            
+            # Check if file exists
+            if not os.path.exists(file_path):
+                # Try with .html extension
+                if not file_path.endswith('.html'):
+                    html_path = file_path + '.html'
+                    if os.path.exists(html_path):
+                        file_path = html_path
+                        logger.debug(f"Found file with .html extension: {html_path}")
+                    else:
+                        logger.warning(f"File not found: {path} (tried {file_path} and {html_path})")
+                        self._send_error(404, f'File not found: {path}')
+                        return
+                else:
+                    logger.warning(f"File not found: {path} -> {file_path}")
+                    self._send_error(404, f'File not found: {path}')
+                    return
+            
+            # Check if it's a directory, serve index.html
+            if os.path.isdir(file_path):
+                file_path = os.path.join(file_path, 'index.html')
+                if not os.path.exists(file_path):
+                    logger.warning(f"Directory index not found: {path} -> {file_path}")
+                    self._send_error(404, f'Directory index not found: {path}')
+                    return
+            
+            # Determine content type
+            content_type = 'text/html'
+            if file_path.endswith('.js'):
+                content_type = 'application/javascript'
+            elif file_path.endswith('.css'):
+                content_type = 'text/css'
+            elif file_path.endswith('.json'):
+                content_type = 'application/json'
+            elif file_path.endswith('.png'):
+                content_type = 'image/png'
+            elif file_path.endswith('.jpg') or file_path.endswith('.jpeg'):
+                content_type = 'image/jpeg'
+            elif file_path.endswith('.svg'):
+                content_type = 'image/svg+xml'
+            
+            # Read and serve file
+            logger.debug(f"Serving file: {file_path} (content-type: {content_type})")
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            self.send_response(200)
+            self.send_header('Content-Type', content_type)
+            self.send_header('Content-Length', str(len(content)))
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(content)
+            
+        except Exception as e:
+            logger.error(f"Error serving file {path}: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def do_POST(self):
+        """Handle POST requests"""
+        parsed = urlparse(self.path)
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+        
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._send_error(400, 'Invalid JSON')
+            return
+        
+        if parsed.path == '/api/execute':
+            self._execute_service_function(data)
+        elif parsed.path == '/api/run-full':
+            self._run_full_workflow(data)
+        else:
+            self._send_error(404, 'Not Found')
+    
+    def _send_json(self, data, status=200):
+        """Send JSON response"""
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode('utf-8'))
+    
+    def _send_error(self, status, message):
+        """Send error response"""
+        self._send_json({'error': message}, status)
+    
+    def _get_project(self):
+        """Get current project from environment"""
+        # Try both PROJECT_ID and DL_PROJECT_ID (Dataloop uses PROJECT_ID)
+        project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+        if not project_id:
+            raise ValueError('PROJECT_ID or DL_PROJECT_ID not set')
+        return dl.projects.get(project_id=project_id)
+    
+    def _get_project_info(self):
+        """Get project information"""
+        try:
+            project = self._get_project()
+            self._send_json({
+                'id': project.id,
+                'name': project.name,
+                'org': project.org.get('id') if project.org else None
+            })
+        except Exception as e:
+            self._send_error(500, str(e))
+    
+    def _list_datasets(self):
+        """List datasets in project"""
+        try:
+            project = self._get_project()
+            datasets = list(project.datasets.list().all())
+            self._send_json({
+                'datasets': [
+                    {'id': ds.id, 'name': ds.name, 'items_count': ds.items_count}
+                    for ds in datasets
+                ]
+            })
+        except Exception as e:
+            self._send_error(500, str(e))
+    
+    def _list_pipelines(self):
+        """List pipelines in project"""
+        try:
+            project = self._get_project()
+            pipelines = list(project.pipelines.list().all())
+            self._send_json({
+                'pipelines': [
+                    {'id': p.id, 'name': p.name, 'status': p.status}
+                    for p in pipelines
+                ]
+            })
+        except Exception as e:
+            self._send_error(500, str(e))
+    
+    def _get_stress_test_service(self, project_id=None):
+        """Get the stress-test-service and its project"""
+        try:
+            # Always need a project to get a service
+            # If project_id not provided, try multiple sources
+            if not project_id:
+                # Try environment variables (Dataloop uses PROJECT_ID, not DL_PROJECT_ID)
+                project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+                
+                # Log all environment variables that might contain project ID
+                env_vars = {k: v for k, v in os.environ.items() if 'PROJECT' in k or 'project' in k.lower()}
+                logger.info(f"Environment variables with 'project': {env_vars}")
+            
+            if not project_id:
+                logger.warning("Project ID not found in environment. Need project_id parameter.")
+                raise ValueError("Project ID is required. Please provide project_id parameter or ensure PROJECT_ID/DL_PROJECT_ID environment variable is set.")
+            
+            project = dl.projects.get(project_id=project_id)
+            logger.info(f"Getting service from project {project.id} ({project.name})")
+            logger.info(f"Looking for service with ID '{STRESS_TEST_SERVICE_ID}' or name '{STRESS_TEST_SERVICE_NAME}'")
+            
+            # Try by ID first
+            try:
+                service = project.services.get(service_id=STRESS_TEST_SERVICE_ID)
+                logger.info(f"Found service by ID: {service.id} ({service.name})")
+                # Check package type - Dpk vs Package
+                if hasattr(service, 'package'):
+                    pkg_name = service.package.name if hasattr(service.package, 'name') else 'N/A'
+                    pkg_revision = getattr(service.package, 'revision', getattr(service.package, 'version', 'N/A'))
+                    logger.info(f"Service package: {pkg_name} (revision: {pkg_revision})")
+                else:
+                    logger.info(f"Service package: N/A")
+                return service, project
+            except Exception as e:
+                logger.debug(f"Service not found by ID {STRESS_TEST_SERVICE_ID}: {e}")
+            
+            # Try by name - but filter out DPK services (they use the DPK package)
+            # List all services with the name and find the one that's NOT the DPK service
+            try:
+                # Get all services with this name (there might be multiple)
+                all_services = project.services.list()
+                matching_services = [s for s in all_services if s.name == STRESS_TEST_SERVICE_NAME]
+                
+                if not matching_services:
+                    raise Exception(f"No service found with name '{STRESS_TEST_SERVICE_NAME}'")
+                
+                logger.info(f"Found {len(matching_services)} service(s) with name '{STRESS_TEST_SERVICE_NAME}'")
+                
+                # Find the service that's NOT the DPK service
+                service = None
+                for s in matching_services:
+                    if hasattr(s, 'package'):
+                        pkg_name = s.package.name if hasattr(s.package, 'name') else 'N/A'
+                        logger.info(f"  - Service {s.id} ({s.name}): package '{pkg_name}'")
+                        
+                        # Skip DPK services - they use the DPK package name or have the DPK service name
+                        if pkg_name == DPK_PACKAGE_NAME or s.name == DPK_SERVICE_NAME:
+                            logger.info(f"    Skipping DPK service {s.id} (uses DPK package or is DPK service)")
+                            continue
+                        
+                        # This is the actual stress-test-service
+                        service = s
+                        break
+                
+                if not service:
+                    logger.error(f"All services with name '{STRESS_TEST_SERVICE_NAME}' are DPK services!")
+                    logger.error(f"Please deploy the separate 'stress-test-service' package (from stress-test-flows/service/)")
+                    raise ValueError(f"Service '{STRESS_TEST_SERVICE_NAME}' not found. All services with this name are DPK services. Please deploy the separate 'stress-test-service' package.")
+                
+                logger.info(f"Found service by name: {service.id} ({service.name})")
+                # Check package type - Dpk vs Package
+                if hasattr(service, 'package'):
+                    pkg_name = service.package.name if hasattr(service.package, 'name') else 'N/A'
+                    pkg_revision = getattr(service.package, 'revision', getattr(service.package, 'version', 'N/A'))
+                    logger.info(f"Service package: {pkg_name} (revision: {pkg_revision})")
+                else:
+                    logger.info(f"Service package: N/A")
+                return service, project
+            except ValueError:
+                # Re-raise ValueError as-is (our custom error)
+                raise
+            except Exception as e:
+                logger.error(f"Could not find stress-test-service in project {project_id}: {e}")
+                # List all services in the project to help debug
+                try:
+                    all_services = project.services.list()
+                    logger.info(f"Available services in project: {[s.name for s in all_services]}")
+                except Exception as list_error:
+                    logger.debug(f"Could not list services: {list_error}")
+                raise ValueError(f"Stress-test-service '{STRESS_TEST_SERVICE_NAME}' not found in project {project_id}. Please deploy it first.")
+        except ValueError:
+            # Re-raise ValueError as-is
+            raise
+        except Exception as e:
+            logger.error(f"Failed to get service: {e}", exc_info=True)
+            raise ValueError(f"Failed to get stress-test-service: {str(e)}")
+    
+    def _execute_service_function(self, data):
+        """
+        Execute a function on the stress-test-service.
+        
+        Request body:
+        {
+            "service_id": "...",  # Optional, auto-detected if not provided
+            "project_id": "...",  # Optional, uses DL_PROJECT_ID
+            "function_name": "download_images",
+            "execution_input": {...}
+        }
+        
+        Note: Service ID is automatically detected - no need to provide it.
+        """
+        try:
+            # Service and project are automatically detected
+            # Project ID comes from request or environment variable
+            project_id = data.get('project_id') or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            function_name = data.get('function_name')
+            execution_input = data.get('execution_input', {})
+            
+            if not function_name:
+                self._send_error(400, 'function_name is required')
+                return
+            
+            # Get service (requires project_id - will use environment variable if not provided)
+            service, project = self._get_stress_test_service(project_id=project_id)
+            logger.info(f"Executing {function_name} on service {service.id} ({service.name}) in project {project.id}")
+            
+            # Execute function
+            execution = service.execute(
+                function_name=function_name,
+                execution_input=execution_input,
+                project_id=project_id
+            )
+            
+            logger.info(f"Execution started: {execution.id}")
+            
+            # Initialize log storage
+            execution_logs[execution.id] = []
+            execution_status[execution.id] = {
+                'status': execution.status,
+                'started_at': time.time()
+            }
+            
+            # Start log polling in background
+            Thread(target=self._poll_execution_logs, args=(execution.id, service, project_id), daemon=True).start()
+            
+            self._send_json({
+                'success': True,
+                'execution_id': execution.id,
+                'status': execution.status,
+                'message': f'Execution {execution.id} started'
+            })
+            
+        except Exception as e:
+            logger.error(f"Execute error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _run_full_workflow(self, data):
+        """
+        Run the full workflow using run_full_stress_test function.
+        
+        Request body (supports both camelCase and snake_case):
+        {
+            "maxImages": 50000,  # or "max_images"
+            "datasetId": "...",  # or "dataset_id" (optional)
+            "projectId": "...",  # or "project_id" (optional, auto-detected from service if not provided)
+            "datasetName": "...",  # or "dataset_name" (optional, used if createDataset=true)
+            "driverId": "...",  # or "driver_id" (optional, default: "rubiks_internal_faas_proxy_driver")
+            "pipelineName": "...",  # or "pipeline_name" (optional)
+            "numWorkers": 50,  # or "num_workers"
+            "cocoDataset": "all",  # or "coco_dataset" - "train2017", "val2017", or "all"
+            "createDataset": false,  # or "create_dataset" - Create dataset if it doesn't exist
+            "skipDownload": false,  # or "skip_download"
+            "skipLinkItems": false,  # or "skip_link_items"
+            "skipPipeline": false,  # or "skip_pipeline"
+            "skipExecute": false,  # or "skip_execute"
+            "linkBaseUrl": "...",  # or "link_base_url" (optional, base URL for link items)
+        }
+        
+        Note: Service ID and Project ID are automatically detected - no need to provide them.
+        """
+        try:
+            # Project ID comes from request or environment variable
+            project_id = data.get('projectId') or data.get('project_id') or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID') or self.project_id
+            
+            logger.info(f"Running full stress test workflow (project_id: {project_id})")
+            
+            # Parse parameters - support both camelCase (from HTML) and snake_case (from API)
+            max_images = data.get('maxImages') or data.get('max_images', 50000)
+            dataset_id_param = data.get('datasetId') or data.get('dataset_id')
+            project_id_param = project_id
+            dataset_name = data.get('datasetName') or data.get('dataset_name')
+            driver_id = data.get('driverId') or data.get('driver_id') or 'rubiks_internal_faas_proxy_driver'
+            pipeline_name = data.get('pipelineName') or data.get('pipeline_name', 'stress-test-resnet-v11')
+            num_workers = data.get('numWorkers') or data.get('num_workers', 50)
+            coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
+            # If dataset_id is empty, automatically create dataset (treat as create_dataset=true)
+            create_dataset_param = data.get('createDataset') or data.get('create_dataset', False)
+            if not dataset_id_param or dataset_id_param.strip() == '':
+                create_dataset = True
+                logger.info(f"Dataset ID is empty, automatically enabling dataset creation")
+            else:
+                create_dataset = create_dataset_param
+            skip_download = data.get('skipDownload') or data.get('skip_download', False)
+            skip_link_items = data.get('skipLinkItems') or data.get('skip_link_items', False)
+            skip_pipeline = data.get('skipPipeline') or data.get('skip_pipeline', False)
+            skip_execute = data.get('skipExecute') or data.get('skip_execute', False)
+            link_base_url = data.get('linkBaseUrl') or data.get('link_base_url') or DEFAULT_LINK_BASE_URL
+            
+            # Generate unique workflow ID
+            import uuid
+            workflow_id = str(uuid.uuid4())
+            
+            # Initialize progress tracking
+            workflow_progress[workflow_id] = {
+                'status': 'starting',
+                'current_step': None,
+                'progress_pct': 0,
+                'logs': [],
+                'result': None,
+                'error': None,
+                'started_at': time.time()
+            }
+            
+            # Run workflow in background thread for real-time progress
+            logger.info(f"Starting workflow in background thread (workflow_id: {workflow_id})")
+            Thread(target=self._run_workflow_async, args=(
+                workflow_id,
+                max_images,
+                dataset_id_param,
+                project_id_param,
+                dataset_name,
+                driver_id,
+                pipeline_name,
+                num_workers,
+                coco_dataset,
+                create_dataset,
+                skip_download,
+                skip_link_items,
+                skip_pipeline,
+                skip_execute,
+                link_base_url
+            ), daemon=True).start()
+            
+            # Return immediately with workflow_id for polling
+            self._send_json({
+                'success': True,
+                'workflow_id': workflow_id,
+                'message': 'Workflow started. Use /api/workflow-progress/{workflow_id} to poll progress.'
+            })
+            
+        except Exception as e:
+            logger.error(f"Run full error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _get_workflow_progress(self, workflow_id):
+        """Get progress for a workflow"""
+        try:
+            if workflow_id not in workflow_progress:
+                self._send_error(404, f'Workflow {workflow_id} not found')
+                return
+            
+            progress = workflow_progress[workflow_id].copy()
+            # Calculate elapsed time
+            if 'started_at' in progress:
+                progress['elapsed_time'] = time.time() - progress['started_at']
+            
+            self._send_json(progress)
+        except Exception as e:
+            logger.error(f"Get workflow progress error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _run_workflow_async(self, workflow_id, max_images, dataset_id_param, project_id_param,
+                           dataset_name, driver_id, pipeline_name, num_workers, coco_dataset,
+                           create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
+                           link_base_url):
+        """Run workflow in background thread with progress updates"""
+        try:
+            def update_progress(step, status, progress_pct, message, result=None, error=None):
+                """Helper to update progress"""
+                if workflow_id not in workflow_progress:
+                    workflow_progress[workflow_id] = {
+                        'status': 'unknown',
+                        'current_step': None,
+                        'progress_pct': 0,
+                        'logs': [],
+                        'result': None,
+                        'error': None,
+                        'started_at': time.time()
+                    }
+                
+                progress = workflow_progress[workflow_id]
+                progress['current_step'] = step
+                progress['status'] = status
+                progress['progress_pct'] = progress_pct
+                
+                # Always append new log entries to ensure UI sees all updates
+                # For batch execution, we'll append but limit to last 50 entries to avoid spam
+                progress['logs'].append({
+                    'timestamp': time.time(),
+                    'step': step,
+                    'level': 'INFO' if not error else 'ERROR',
+                    'message': message
+                })
+                
+                # Limit logs to last 100 entries to prevent memory issues
+                if len(progress['logs']) > 100:
+                    progress['logs'] = progress['logs'][-100:]
+                
+                if result:
+                    progress['result'] = result
+                if error:
+                    progress['error'] = error
+                    progress['status'] = 'failed'
+                
+                logger.info(f"[Workflow {workflow_id}] {step}: {status} ({progress_pct}%) - {message}")
+            
+            update_progress('initializing', 'running', 0, 'Starting workflow...')
+            
+            # Get server instance (handler doesn't have direct access)
+            global _stress_test_server_instance
+            if _stress_test_server_instance is None:
+                raise RuntimeError("StressTestServer instance not available")
+            
+            server = _stress_test_server_instance
+            
+            # Call run_full_stress_test with progress callback
+            result = server.run_full_stress_test(
+                max_images=max_images,
+                dataset_id=dataset_id_param,
+                project_id=project_id_param,
+                link_base_url=link_base_url,
+                dataset_name=dataset_name,
+                driver_id=driver_id,
+                pipeline_name=pipeline_name,
+                num_workers=num_workers,
+                coco_dataset=coco_dataset,
+                create_dataset=create_dataset,
+                skip_download=skip_download,
+                skip_link_items=skip_link_items,
+                skip_pipeline=skip_pipeline,
+                skip_execute=skip_execute,
+                progress_callback=update_progress
+            )
+            
+            if result.get('success'):
+                update_progress('complete', 'completed', 100, 'Workflow completed successfully', result=result)
+            else:
+                update_progress('complete', 'failed', 100, f"Workflow failed: {result.get('error', 'Unknown error')}", error=result.get('error'))
+                
+        except Exception as e:
+            logger.error(f"Workflow async error: {e}", exc_info=True)
+            if workflow_id in workflow_progress:
+                workflow_progress[workflow_id]['status'] = 'failed'
+                workflow_progress[workflow_id]['error'] = str(e)
+                workflow_progress[workflow_id]['logs'].append({
+                    'timestamp': time.time(),
+                    'step': 'error',
+                    'level': 'ERROR',
+                    'message': f'Workflow failed: {str(e)}'
+                })
+    
+    def _get_workflow_progress(self, workflow_id):
+        """Get progress for a workflow"""
+        try:
+            if workflow_id not in workflow_progress:
+                self._send_error(404, f'Workflow {workflow_id} not found')
+                return
+            
+            progress = workflow_progress[workflow_id].copy()
+            # Calculate elapsed time
+            if 'started_at' in progress:
+                progress['elapsed_time'] = time.time() - progress['started_at']
+            
+            self._send_json(progress)
+        except Exception as e:
+            logger.error(f"Get workflow progress error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _get_execution_logs(self, execution_id):
+        """Get logs for an execution"""
+        try:
+            if execution_id not in execution_logs:
+                self._send_json({'logs': [], 'status': 'unknown'})
+                return
+            
+            logs = execution_logs[execution_id]
+            status_info = execution_status.get(execution_id, {'status': 'unknown'})
+            
+            self._send_json({
+                'logs': logs,
+                'status': status_info.get('status', 'unknown')
+            })
+            
+        except Exception as e:
+            logger.error(f"Get logs error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _get_execution_status(self, execution_id):
+        """Get execution status"""
+        try:
+            status_info = execution_status.get(execution_id, {'status': 'unknown'})
+            self._send_json(status_info)
+        except Exception as e:
+            self._send_error(500, str(e))
+    
+    def _poll_execution_logs(self, execution_id, service, project_id):
+        """
+        Poll execution logs in background thread.
+        """
+        try:
+            logger.info(f"Starting log polling for execution {execution_id}")
+            
+            max_polls = 600  # Poll for up to 10 minutes (600 * 1 second)
+            poll_count = 0
+            
+            while poll_count < max_polls:
+                try:
+                    # Get execution status
+                    execution = service.executions.get(execution_id=execution_id)
+                    current_status = execution.status.lower()
+                    
+                    # Update status
+                    if execution_id in execution_status:
+                        execution_status[execution_id]['status'] = current_status
+                    
+                    if current_status in ['completed', 'failed', 'success']:
+                        logger.info(f"Execution {execution_id} finished with status: {current_status}")
+                        break
+                    
+                    # Get logs from execution
+                    try:
+                        logs = service.logs.list(execution_id=execution_id)
+                        if logs:
+                            for log_entry in logs:
+                                log_data = {
+                                    'timestamp': log_entry.get('timestamp', time.time()),
+                                    'level': log_entry.get('level', 'INFO'),
+                                    'message': log_entry.get('message', ''),
+                                    'function_name': log_entry.get('function_name', '')
+                                }
+                                
+                                # Avoid duplicates
+                                if log_data not in execution_logs[execution_id]:
+                                    execution_logs[execution_id].append(log_data)
+                    except Exception as log_error:
+                        logger.debug(f"Could not fetch logs yet: {log_error}")
+                    
+                    time.sleep(1)  # Poll every second
+                    poll_count += 1
+                    
+                except Exception as e:
+                    logger.warning(f"Poll error: {e}")
+                    time.sleep(2)
+                    poll_count += 1
+            
+            if poll_count >= max_polls:
+                logger.warning(f"Log polling timeout for execution {execution_id}")
+                
+        except Exception as e:
+            logger.error(f"Log polling error: {e}", exc_info=True)
+
+
+class StressTestServer(dl.BaseServiceRunner):
+    """Dataloop service runner for stress test server - combines UI and execution"""
+    
+    def __init__(self, 
+                 storage_base_path: str = None,
+                 link_base_url: str = None,
+                 dataset_id: str = None):
+        super().__init__()
+        self.port = int(os.environ.get('PORT', 3000))
+        self.server = None
+        self.server_thread = None
+        
+        # Get link_base_url from parameter or default
+        link_base_url_provided = link_base_url or DEFAULT_LINK_BASE_URL
+        
+        # Check if LINK_ITEM_URL_OVERRIDE env var exists and derive storage_base_path
+        link_override = os.environ.get('LINK_ITEM_URL_OVERRIDE')
+        if link_base_url_provided and link_override:
+            try:
+                # Parse LINK_ITEM_URL_OVERRIDE: "http://34.140.193.179/s,file://s"
+                # Format: "source_url,target_url"
+                parts = link_override.split(',')
+                if len(parts) == 2:
+                    source_url = parts[0].strip()  # "http://34.140.193.179/s"
+                    target_url = parts[1].strip()  # "file://s"
+                    
+                    # Replace the entire source_url in link_base_url with target_url to derive storage path
+                    # Example: "http://34.140.193.179/s/pd_datfs2/stress-test" -> "file://s/pd_datfs2/stress-test"
+                    if source_url in link_base_url_provided:
+                        storage_path = link_base_url_provided.replace(source_url, target_url)
+                        # Remove "file:/" (one slash, not "file://") to get the base path
+                        # "file://s/pd_datfs2/stress-test" -> "s/pd_datfs2/stress-test"
+                        storage_path = storage_path.replace('file:/', '')
+                        # Ensure it starts with /
+                        if not storage_path.startswith('/'):
+                            storage_path = '/' + storage_path
+                        # Use this as storage_base_path
+                        if storage_base_path is None:
+                            storage_base_path = storage_path
+                            logger.info(f"Derived storage_base_path from LINK_ITEM_URL_OVERRIDE: {storage_base_path}")
+                            logger.info(f"  Link Base URL (preserved): {link_base_url_provided}")
+                            logger.info(f"  LINK_ITEM_URL_OVERRIDE: {link_override}")
+                            logger.info(f"  Source URL: {source_url}")
+                            logger.info(f"  Target URL: {target_url}")
+                            
+                            # IMPORTANT: link_base_url_provided should keep /s (it's the HTTP URL)
+                            # Only storage_path is derived. Verify link_base_url_provided has /s
+                            if '/s' not in link_base_url_provided:
+                                logger.warning(f"  WARNING: link_base_url_provided missing '/s': {link_base_url_provided}")
+                                # If storage path has /s, ensure link URL also has it
+                                if storage_path.startswith('/s/'):
+                                    # Extract path after /s from storage_path
+                                    path_after_s = storage_path[3:]  # Remove '/s/'
+                                    # Reconstruct link_base_url with source_url (which includes /s)
+                                    link_base_url_provided = f"{source_url}/{path_after_s}"
+                                    logger.info(f"  Reconstructed link_base_url to include /s: {link_base_url_provided}")
+                            else:
+                                logger.info(f"  Verified link_base_url_provided includes /s: {link_base_url_provided}")
+            except Exception as e:
+                logger.warning(f"Failed to parse LINK_ITEM_URL_OVERRIDE: {e}, using default storage_base_path", exc_info=True)
+        
+        # Stress test service properties
+        self.storage_base_path = storage_base_path or DEFAULT_STORAGE_BASE_PATH
+        self.link_base_url_base = link_base_url_provided
+        self.default_dataset_id = dataset_id or DEFAULT_DATASET_ID
+        
+        # Add date to paths
+        self.date_str = datetime.now().strftime('%Y-%m-%d')
+        self.storage_path = f"{self.storage_base_path}/{self.date_str}"
+        self.link_base_url = f"{self.link_base_url_base}/{self.date_str}"
+        
+        # Get project_id from environment variable (set by Dataloop)
+        self.project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+        if self.project_id:
+            logger.info(f"Project ID from environment: {self.project_id}")
+            # Set it in both environment variables for handlers to use (for consistency)
+            os.environ['PROJECT_ID'] = self.project_id
+            os.environ['DL_PROJECT_ID'] = self.project_id
+        else:
+            logger.warning("Project ID not found in environment variables")
+            logger.warning(f"Available env vars with 'project': {[k for k in os.environ.keys() if 'project' in k.lower()]}")
+        
+        logger.info(f"StressTestServer initialized")
+        logger.info(f"Storage base path: {self.storage_base_path}")
+        logger.info(f"Storage path (with date): {self.storage_path}")
+        logger.info(f"Link base URL base: {self.link_base_url_base}")
+        logger.info(f"Link base URL (with date): {self.link_base_url}")
+        logger.info(f"Default dataset ID: {self.default_dataset_id}")
+        
+        # Store global reference for handler to access
+        global _stress_test_server_instance
+        _stress_test_server_instance = self
+        
+        # Check if this is actually a custom server
+        is_custom_server = os.environ.get('IS_CUSTOM_SERVER', 'false').lower() == 'true'
+        logger.info(f"IS_CUSTOM_SERVER environment variable: {os.environ.get('IS_CUSTOM_SERVER', 'not set')}")
+        logger.info(f"is_custom_server flag: {is_custom_server}")
+        
+        # Only start server if IS_CUSTOM_SERVER is true
+        if is_custom_server:
+            logger.info("IS_CUSTOM_SERVER is true - starting server in __init__")
+            self._start_server()
+        else:
+            logger.warning("IS_CUSTOM_SERVER is false - NOT starting server")
+            logger.warning("This means the agent runner will start its own external server")
+            logger.warning("Check dataloop.json config - isCustomServer should be in module.config")
+    
+    def _start_server(self):
+        """Start the HTTP server in a background thread"""
+        logger.info(f"Starting stress test server on port {self.port}")
+        logger.info(f"Static files directory: {STATIC_DIR}")
+        logger.info(f"Static directory exists: {os.path.exists(STATIC_DIR)}")
+        
+        if os.path.exists(STATIC_DIR):
+            files = os.listdir(STATIC_DIR)
+            logger.info(f"Files in static directory: {files}")
+        else:
+            logger.warning(f"Static directory does not exist! Creating it...")
+            os.makedirs(STATIC_DIR, exist_ok=True)
+        
+        
+        try:
+            self.server = HTTPServer(('0.0.0.0', self.port), StressTestHandler)
+            logger.info(f"HTTPServer created successfully on port {self.port}")
+        except OSError as e:
+            if e.errno == 98:  # Address already in use
+                logger.error(f"Port {self.port} is already in use - cannot start server")
+                logger.error("This usually means IS_CUSTOM_SERVER is false and agent runner is using the port")
+                logger.error("Check dataloop.json - isCustomServer should be in module.config")
+                logger.error("Service will continue but server will not be available")
+                # Don't raise - let the service start even if server can't bind
+                # The service can still handle function calls
+                self.server = None
+                return
+            else:
+                logger.error(f"Failed to create HTTPServer: {e}", exc_info=True)
+                self.server = None
+                return  # Don't raise, let service continue
+        except Exception as e:
+            logger.error(f"Failed to create HTTPServer: {e}", exc_info=True)
+            self.server = None
+            return  # Don't raise, let service continue
+        
+        logger.info(f"Server started at http://0.0.0.0:{self.port}")
+        logger.info(f"Server is listening on port {self.port}")
+        logger.info("Available endpoints:")
+        logger.info("  GET  /                        - Serve HTML documentation")
+        logger.info("  GET  /api/health              - Health check")
+        logger.info("  GET  /api/project             - Get project info")
+        logger.info("  GET  /api/datasets            - List datasets")
+        logger.info("  GET  /api/pipelines           - List pipelines")
+        logger.info("  POST /api/execute             - Execute service function")
+        logger.info("  POST /api/run-full            - Run full workflow (returns workflow_id)")
+        logger.info("  GET  /api/workflow-progress/<workflow_id> - Get workflow progress (real-time)")
+        logger.info("  GET  /api/logs/<execution_id> - Get execution logs")
+        logger.info("  GET  /api/execution/<execution_id> - Get execution status")
+        
+        # Verify server is ready
+        logger.info("=" * 60)
+        logger.info("SERVER READY - Listening for requests on port %s", self.port)
+        logger.info("=" * 60)
+        
+        # Test if port is available (just for logging, don't fail if in use)
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            sock.bind(('0.0.0.0', self.port))
+            sock.close()
+            logger.info(f"Port {self.port} is available")
+        except OSError as e:
+            logger.warning(f"Port {self.port} appears to be in use: {e}")
+            logger.warning("This might be because agent-app is using port 3000")
+            logger.warning("Will attempt to start server anyway - if it fails, check IS_CUSTOM_SERVER")
+            # Don't raise - let the actual server startup fail if port is truly in use
+        
+        # Only start server thread if server was created successfully
+        if self.server is None:
+            logger.error("Server was not created - cannot start server thread")
+            return
+        
+        # Start server in background thread so it doesn't block
+        # For custom servers, we need to start immediately
+        def run_server():
+            try:
+                logger.info("Calling server.serve_forever() - this will block...")
+                self.server.serve_forever()
+            except Exception as e:
+                logger.error(f"Server crashed: {e}", exc_info=True)
+                # Don't raise in thread - just log the error
+        
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+        logger.info("Server thread started - server is now running in background")
+    
+    # ========== Stress Test Execution Methods ==========
+    
+    def create_dataset(self, project_id: str = None, dataset_name: str = None, driver_id: str = None) -> dict:
+        """
+        Create a dataset for stress testing if it doesn't exist.
+        
+        Args:
+            project_id: Project ID (if None, uses project from default_dataset_id)
+            dataset_name: Dataset name (default: 'stress-test-dataset-{date}')
+            driver_id: Driver ID for the dataset (default: 'rubiks_internal_faas_proxy_driver')
+        
+        Returns:
+            dict with dataset info
+        """
+        if dataset_name is None:
+            dataset_name = f'stress-test-dataset-{self.date_str}'
+        
+        if driver_id is None:
+            driver_id = 'rubiks_internal_faas_proxy_driver'
+        
+        logger.info(f"Creating dataset: {dataset_name} with driver_id: {driver_id}")
+        
+        # Get project
+        if project_id is None:
+            # Try to get project from default dataset if it exists
+            try:
+                default_dataset = dl.datasets.get(dataset_id=self.default_dataset_id)
+                project = default_dataset.project
+                project_id = project.id
+                logger.info(f"Using project from default dataset: {project.name} (ID: {project_id})")
+            except:
+                # If default dataset doesn't exist, we need project_id
+                logger.error("Cannot determine project_id. Please provide project_id parameter.")
+                return {'error': 'project_id is required if default_dataset_id does not exist'}
+        else:
+            project = dl.projects.get(project_id=project_id)
+            logger.info(f"Using provided project: {project.name} (ID: {project_id})")
+        
+        # Check if dataset already exists
+        try:
+            existing_dataset = project.datasets.get(dataset_name=dataset_name)
+            logger.info(f"Dataset already exists: {existing_dataset.id}")
+            return {
+                'dataset_id': existing_dataset.id,
+                'dataset_name': existing_dataset.name,
+                'project_id': project_id,
+                'driver_id': driver_id,
+                'created': False,
+                'message': 'Dataset already exists'
+            }
+        except dl.exceptions.NotFound:
+            logger.info(f"Dataset does not exist, creating: {dataset_name}")
+        
+        # Create dataset with driver_id
+        try:
+            # Try using SDK with driver_id parameter
+            # If that doesn't work, fall back to direct API call
+            try:
+                dataset = project.datasets.create(
+                    dataset_name=dataset_name,
+                    driver_id=driver_id
+                )
+            except (TypeError, AttributeError) as e:
+                # SDK might not support driver_id directly, use API
+                logger.info(f"SDK doesn't support driver_id parameter, using API directly: {e}")
+                headers = {'Authorization': f'Bearer {dl.token()}'}
+                base_url = dl.environment()
+                
+                payload = {
+                    'name': dataset_name,
+                    'projects': [project_id],
+                    'driverId': driver_id,
+                    'createDefaultRecipe': True
+                }
+                
+                response = requests.post(
+                    f"{base_url}/datasets",
+                    json=payload,
+                    headers=headers
+                )
+                response.raise_for_status()
+                dataset_data = response.json()
+                
+                # Get the dataset object from SDK
+                dataset = project.datasets.get(dataset_id=dataset_data['id'])
+            logger.info(f"Created dataset: {dataset.id} with driver_id: {driver_id}")
+            return {
+                'dataset_id': dataset.id,
+                'dataset_name': dataset.name,
+                'project_id': project_id,
+                'driver_id': driver_id,
+                'created': True,
+                'message': 'Dataset created successfully'
+            }
+        except Exception as e:
+            logger.error(f"Failed to create dataset: {e}")
+            return {
+                'error': f'Failed to create dataset: {str(e)}',
+                'project_id': project_id,
+                'dataset_name': dataset_name,
+                'driver_id': driver_id
+            }
+    
+    def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None) -> dict:
+        """
+        Download images from COCO to NFS storage.
+        
+        Args:
+            image_urls: List of image URLs to download (default: COCO train+val)
+            max_images: Maximum number of images to download (default: 50000)
+            num_workers: Number of parallel download workers (default: 50)
+            dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
+        
+        Returns:
+            dict with download results
+        """
+        # Get COCO image URLs if not provided
+        if image_urls is None:
+            logger.info(f"Fetching COCO image list (dataset={dataset}, max={max_images})...")
+            all_urls = get_coco_images(dataset=dataset)
+            image_urls = all_urls[:max_images]
+            logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
+        
+        total_images = len(image_urls)
+        logger.info(f"Starting download of {total_images} images to {self.storage_path}")
+        logger.info(f"Using {num_workers} parallel workers")
+        
+        # Create directory
+        os.makedirs(self.storage_path, exist_ok=True)
+        
+        downloaded = []
+        failed = []
+        skipped = []
+        
+        def download_one(url):
+            try:
+                filename = os.path.basename(url)
+                filepath = os.path.join(self.storage_path, filename)
+                
+                # Skip if already exists
+                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                    return {'success': True, 'filename': filename, 'path': filepath, 'skipped': True}
+                
+                response = requests.get(url, timeout=60)
+                response.raise_for_status()
+                
+                with open(filepath, 'wb') as f:
+                    f.write(response.content)
+                
+                return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
+            except Exception as e:
+                return {'success': False, 'url': url, 'error': str(e)}
+        
+        # Download in parallel with progress logging
+        completed = 0
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(download_one, url): url for url in image_urls}
+            for future in as_completed(futures):
+                result = future.result()
+                completed += 1
+                
+                if result['success']:
+                    if result.get('skipped'):
+                        skipped.append(result)
+                    else:
+                        downloaded.append(result)
+                else:
+                    failed.append(result)
+                
+                # Log progress every 100 images
+                if completed % 100 == 0 or completed == total_images:
+                    progress_pct = (completed / total_images) * 100
+                    progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
+                    logger.info(progress_msg)
+                    # Update progress callback if provided
+                    if progress_callback:
+                        # Calculate progress within download step (15% to 40% of overall workflow)
+                        overall_progress = 15 + (progress_pct / 100) * 25  # 15% to 40%
+                        progress_callback('download_images', 'running', overall_progress, progress_msg)
+        
+        logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed")
+        
+        # List actual files in directory
+        actual_files = []
+        if os.path.exists(self.storage_path):
+            actual_files = [f for f in os.listdir(self.storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        
+        return {
+            'storage_path': self.storage_path,
+            'total_requested': total_images,
+            'downloaded': len(downloaded),
+            'skipped': len(skipped),
+            'failed': len(failed),
+            'actual_files_on_disk': len(actual_files),
+            'files': actual_files
+        }
+    
+    def create_link_items(self, dataset_id: str = None, filenames: list = None, num_workers: int = 20, progress_callback=None, link_base_url: str = None, project_id: str = None) -> dict:
+        """
+        Create link items in dataset for downloaded images (parallel upload).
+        
+        Args:
+            dataset_id: Dataset ID (default: configured dataset_id)
+            filenames: List of filenames to create links for
+            num_workers: Number of parallel upload workers (default: 20)
+            progress_callback: Optional callback for progress updates
+            link_base_url: Base URL for link items (overrides instance default)
+            project_id: Project ID (required if dataset access needs project context)
+        
+        Returns:
+            dict with creation results
+        """
+        if dataset_id is None:
+            dataset_id = self.default_dataset_id
+        
+        logger.info(f"Creating link items in dataset {dataset_id}")
+        
+        # Get dataset - use project to avoid 403 errors
+        try:
+            # Try to get project_id if not provided
+            if project_id is None:
+                project_id = self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            
+            if project_id:
+                project = dl.projects.get(project_id=project_id)
+                dataset = project.datasets.get(dataset_id=dataset_id)
+            else:
+                # Fallback to direct access (may fail with 403)
+                dataset = dl.datasets.get(dataset_id=dataset_id)
+        except Exception as e:
+            logger.error(f"Failed to get dataset: {e}")
+            raise
+        
+        # Override link_base_url if provided
+        if link_base_url:
+            # Ensure link_base_url preserves the /s path structure
+            # If it doesn't end with a slash, add date directly
+            if link_base_url.endswith('/'):
+                link_base_url_full = f"{link_base_url}{self.date_str}"
+            else:
+                link_base_url_full = f"{link_base_url}/{self.date_str}"
+            logger.info(f"[create_link_items] Using provided link_base_url: {link_base_url} -> {link_base_url_full}")
+        else:
+            link_base_url_full = self.link_base_url
+            logger.info(f"[create_link_items] Using instance link_base_url: {link_base_url_full}")
+        
+        # Log the final link_base_url_full to verify /s is present
+        if '/s/' not in link_base_url_full and '/s' not in link_base_url_full:
+            logger.warning(f"[create_link_items] WARNING: link_base_url_full does not contain '/s': {link_base_url_full}")
+        
+        # If no filenames provided, scan the storage path
+        if filenames is None:
+            if os.path.exists(self.storage_path):
+                filenames = [f for f in os.listdir(self.storage_path) 
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            else:
+                filenames = []
+        
+        if not filenames:
+            return {'error': 'No images found in storage path', 'storage_path': self.storage_path, 'created': 0}
+        
+        total_files = len(filenames)
+        logger.info(f"Creating {total_files} link items with {num_workers} workers...")
+        
+        # Get existing items to skip
+        logger.info("Fetching existing items to skip duplicates...")
+        existing_items = set()
+        try:
+            remote_path = f'/stress-test/{self.date_str}'
+            filters = dl.Filters()
+            filters.add(field='dir', values=remote_path)
+            pages = dataset.items.list(filters=filters)
+            for item in pages.all():
+                existing_items.add(item.name)
+            logger.info(f"Found {len(existing_items)} existing items in {remote_path}")
+        except Exception as e:
+            logger.warning(f"Could not fetch existing items: {e}")
+        
+        # Filter out already uploaded files
+        filenames_to_upload = []
+        for filename in filenames:
+            json_filename = f"{os.path.splitext(filename)[0]}.json"
+            if json_filename not in existing_items:
+                filenames_to_upload.append(filename)
+        
+        skipped_count = len(filenames) - len(filenames_to_upload)
+        logger.info(f"Skipping {skipped_count} already uploaded items, uploading {len(filenames_to_upload)} new items")
+        
+        if not filenames_to_upload:
+            return {
+                'dataset_id': dataset_id,
+                'total_requested': total_files,
+                'created': 0,
+                'skipped': skipped_count,
+                'failed': 0,
+                'message': 'All items already exist'
+            }
+        
+        created = []
+        failed = []
+        
+        def upload_one(filename):
+            try:
+                # Determine mimetype
+                ext = filename.lower().split('.')[-1]
+                mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
+                
+                # Create link URL - ensure it preserves /s if present in base URL
+                link_url = f"{link_base_url_full}/{filename}"
+                # Verify /s is in the URL
+                if '/s/' not in link_url and link_url.count('/s') == 0:
+                    logger.warning(f"[create_link_items] WARNING: Link URL missing '/s': {link_url}")
+                logger.debug(f"Created link URL for {filename}: {link_url}")
+                
+                # Create link item JSON content
+                link_item_content = {
+                    "type": "link",
+                    "shebang": "dataloop",
+                    "metadata": {
+                        "dltype": "link",
+                        "linkInfo": {
+                            "type": "url",
+                            "ref": link_url,
+                            "mimetype": mimetype
+                        }
+                    }
+                }
+                
+                # Write to temporary JSON file (use unique path per thread)
+                json_filename = f"{os.path.splitext(filename)[0]}.json"
+                temp_json_path = f"/tmp/{threading.current_thread().ident}_{json_filename}"
+                with open(temp_json_path, 'w') as f:
+                    json.dump(link_item_content, f)
+                
+                # Upload the JSON file to dataset
+                item = dataset.items.upload(
+                    local_path=temp_json_path,
+                    remote_path=f'/stress-test/{self.date_str}',
+                    overwrite=False
+                )
+                
+                # Clean up temp file
+                os.remove(temp_json_path)
+                
+                return {'success': True, 'filename': json_filename, 'item_id': item.id, 'link_url': link_url}
+                
+            except Exception as e:
+                return {'success': False, 'filename': filename, 'error': str(e)}
+        
+        # Upload in parallel with progress logging
+        completed = 0
+        total_to_upload = len(filenames_to_upload)
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(upload_one, fn): fn for fn in filenames_to_upload}
+            for future in as_completed(futures):
+                result = future.result()
+                completed += 1
+                
+                if result['success']:
+                    created.append(result)
+                else:
+                    failed.append(result)
+                
+                # Log progress every 100 items
+                if completed % 100 == 0 or completed == total_to_upload:
+                    progress_pct = (completed / total_to_upload) * 100 if total_to_upload > 0 else 0
+                    progress_msg = f"Progress: {completed}/{total_to_upload} ({progress_pct:.1f}%) - Created: {len(created)}, Failed: {len(failed)}"
+                    logger.info(progress_msg)
+                    # Update progress callback if provided
+                    if progress_callback:
+                        # Calculate progress within link items step (45% to 60% of overall workflow)
+                        overall_progress = 45 + (progress_pct / 100) * 15  # 45% to 60%
+                        progress_callback('create_link_items', 'running', overall_progress, progress_msg)
+        
+        logger.info(f"Link items complete: {len(created)} created, {skipped_count} skipped, {len(failed)} failed")
+        
+        return {
+            'dataset_id': dataset_id,
+            'storage_path': self.storage_path,
+            'link_base_url': link_base_url_full,
+            'total_requested': total_files,
+            'created': len(created),
+            'skipped': skipped_count,
+            'failed': len(failed),
+            'failed_items': failed[:10] if failed else [],
+            'sample_items': created[:5] if created else []
+        }
+    
+    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None) -> dict:
+        """
+        Create stress test pipeline with ResNet model node.
+        Installs the ResNet DPK if not already installed.
+        
+        Args:
+            project_id: Project ID
+            pipeline_name: Pipeline name
+            dpk_name: DPK name to install (default: 'resnet')
+        
+        Returns:
+            dict with pipeline info
+        """
+        # Set defaults for None values (SDK passes None explicitly)
+        if dpk_name is None:
+            dpk_name = 'resnet'
+        if pipeline_name is None:
+            pipeline_name = f'stress-test-pipeline-{self.date_str}'
+        
+        logger.info(f"Creating pipeline: {pipeline_name}")
+        
+        # Get project - use provided project_id or get from environment
+        if project_id is None:
+            project_id = self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            if project_id is None:
+                # Try to get from default dataset if available
+                try:
+                    dataset = dl.datasets.get(dataset_id=self.default_dataset_id)
+                    project_id = dataset.project.id
+                except Exception as e:
+                    logger.warning(f"Could not get project from dataset: {e}")
+                    raise ValueError("Project ID is required. Please provide project_id or ensure PROJECT_ID environment variable is set.")
+        
+        project = dl.projects.get(project_id=project_id)
+        logger.info(f"Project: {project.name} (ID: {project.id})")
+        
+        # Step 1: Install ResNet DPK if not already installed
+        # Check for custom DPK name first: resnet-{project.id}
+        custom_dpk_name = f'resnet-{project.id}'
+        logger.info(f"Step 1: Checking if custom DPK '{custom_dpk_name}' is installed...")
+        app = None
+        installed_dpk_name = dpk_name  # Default to original dpk_name, will be updated if custom DPK is used
+        try:
+            # Check if app is already installed (look for custom DPK name)
+            apps = list(project.apps.list().all())
+            logger.info(f"Found {len(apps)} apps in project")
+            for a in apps:
+                logger.info(f"  - App: {a.name}, dpk_name: {getattr(a, 'dpk_name', 'N/A')}")
+                # Check for custom DPK name first
+                if getattr(a, 'dpk_name', '') == custom_dpk_name:
+                    app = a
+                    installed_dpk_name = custom_dpk_name
+                    logger.info(f"Found existing custom DPK app: {app.id} (dpk_name: {custom_dpk_name})")
+                    break
+                # Fallback: also check for original resnet DPK
+                elif getattr(a, 'dpk_name', '') == dpk_name:
+                    logger.info(f"Found original {dpk_name} app (will try to create custom version)")
+                    # Use original if custom creation fails
+                    if app is None:
+                        app = a
+                        installed_dpk_name = dpk_name
+                        logger.info(f"Will use original DPK app: {app.name} (dpk_name: {dpk_name})")
+                    # Don't break - we want to try creating custom version first
+        except Exception as e:
+            logger.warning(f"Could not list apps: {e}")
+        
+        dpk_to_install = None  # Initialize
+        
+        if app is None:
+            # Check if custom resnet DPK already exists for this project
+            custom_dpk_name = f'resnet-{project.id}'
+            logger.info(f"Checking for custom DPK: {custom_dpk_name}")
+            
+            try:
+                # Try to get the custom DPK (project-scoped, should be accessible)
+                custom_dpk = project.dpks.get(dpk_name=custom_dpk_name)
+                logger.info(f"Found existing custom DPK: {custom_dpk.name} v{custom_dpk.version}")
+                dpk_to_install = custom_dpk
+            except dl.exceptions.NotFound:
+                logger.info(f"Custom DPK not found, creating it from {dpk_name}...")
+                try:
+                    # Try to get the original ResNet DPK from marketplace
+                    # Services may not have permission to access marketplace DPKs directly
+                    try:
+                        original_dpk = dl.dpks.get(dpk_name=dpk_name)
+                        logger.info(f"Found original DPK from marketplace: {original_dpk.name} v{original_dpk.version}")
+                    except Exception as marketplace_error:
+                        error_msg = str(marketplace_error)
+                        if '403' in error_msg or 'Forbidden' in error_msg or 'not authorized' in error_msg.lower():
+                            logger.warning(f"Service doesn't have permission to access marketplace DPKs")
+                            logger.warning(f"Falling back to using original DPK name without custom version")
+                            # Skip custom DPK creation, use original
+                            raise Exception(f"Cannot access marketplace DPK. Will use original DPK if available.")
+                        else:
+                            raise
+                    
+                    # Clone the DPK and modify service versions
+                    logger.info(f"Cloning DPK and modifying service versions to dtlpy 1.118.15...")
+                    
+                    # Get DPK data via API
+                    headers = {'Authorization': f'Bearer {dl.token()}'}
+                    base_url = dl.environment()
+                    
+                    # Get DPK details - correct endpoint: /app-registry/{id}
+                    dpk_response = requests.get(
+                        f"{base_url}/app-registry/{original_dpk.id}",
+                        headers=headers
+                    )
+                    dpk_response.raise_for_status()
+                    dpk_data = dpk_response.json()
+                    
+                    logger.info(f"Got DPK data, modifying services and computeConfigs...")
+                    
+                    # Modify services to have dtlpy version 1.118.15
+                    if 'components' in dpk_data and 'services' in dpk_data['components']:
+                        for service in dpk_data['components']['services']:
+                            if 'versions' not in service:
+                                service['versions'] = {}
+                            service['versions']['dtlpy'] = '1.118.15'
+                            logger.info(f"Updated service {service.get('name', 'unknown')} with dtlpy version 1.118.15")
+                    
+                    # Modify computeConfigs to have dtlpy version 1.118.15 (especially resnet-deploy)
+                    if 'components' in dpk_data and 'computeConfigs' in dpk_data['components']:
+                        for compute_config in dpk_data['components']['computeConfigs']:
+                            if 'versions' not in compute_config:
+                                compute_config['versions'] = {}
+                            compute_config['versions']['dtlpy'] = '1.118.15'
+                            
+                            # Merge runtime config with existing runtime if it exists
+                            new_runtime = {
+                                'concurrency': 5,
+                                'autoscaler': {
+                                    'type': 'rabbitmq',
+                                    'minReplicas': 1,
+                                    'maxReplicas': 8
+                                }
+                            }
+                            if 'runtime' in compute_config and isinstance(compute_config['runtime'], dict):
+                                # Merge existing runtime with new runtime (new values take precedence)
+                                compute_config['runtime'] = {**compute_config['runtime'], **new_runtime}
+                                # Also merge autoscaler if it exists
+                                if 'autoscaler' in compute_config['runtime'] and isinstance(compute_config['runtime']['autoscaler'], dict):
+                                    compute_config['runtime']['autoscaler'] = {**compute_config['runtime']['autoscaler'], **new_runtime['autoscaler']}
+                            else:
+                                compute_config['runtime'] = new_runtime
+                            config_name = compute_config.get('name', 'unknown')
+                            logger.info(f"Updated computeConfig '{config_name}' with dtlpy version 1.118.15")
+                    
+                    # Update DPK name and metadata
+                    dpk_data['name'] = custom_dpk_name
+                    dpk_data['displayName'] = f'ResNet (dtlpy 1.118.15) - {project.id[:8]}'
+                    dpk_data['version'] = '1.0.0'  # Start fresh version
+                    dpk_data['scope'] = 'project'  # Project-scoped
+                    dpk_data['context'] = {'project': project.id}  # Set project context
+                    
+                    # Remove fields that shouldn't be in publish
+                    dpk_data.pop('_id', None)
+                    dpk_data.pop('id', None)
+                    dpk_data.pop('createdAt', None)
+                    dpk_data.pop('updatedAt', None)
+                    dpk_data.pop('creator', None)
+                    dpk_data.pop('latest', None)
+                    dpk_data.pop('baseId', None)
+                    
+                    logger.info(f"Publishing custom DPK: {custom_dpk_name}")
+                    
+                    # Try to publish via SDK first (more reliable for permissions)
+                    try:
+                        # Create a temporary DPK file and publish via SDK
+                        import tempfile
+                        import shutil
+                        
+                        # Create temp directory for DPK
+                        temp_dir = tempfile.mkdtemp()
+                        dpk_json_path = os.path.join(temp_dir, 'dataloop.json')
+                        
+                        # Write modified DPK data to file
+                        with open(dpk_json_path, 'w') as f:
+                            json.dump(dpk_data, f, indent=2)
+                        
+                        logger.info(f"Created temporary DPK file: {dpk_json_path}")
+                        
+                        # Publish using SDK (which handles authentication better)
+                        custom_dpk = project.dpks.publish(
+                            manifest_filepath=dpk_json_path,
+                            local_path=temp_dir
+                        )
+                        logger.info(f"DPK published via SDK: {custom_dpk.name} v{custom_dpk.version}")
+                        dpk_to_install = custom_dpk
+                        
+                        # Clean up temp directory
+                        shutil.rmtree(temp_dir, ignore_errors=True)
+                        
+                    except Exception as sdk_error:
+                        error_msg = str(sdk_error)
+                        logger.warning(f"SDK publish failed: {sdk_error}")
+                        
+                        # Check if it's a permission error
+                        if '403' in error_msg or 'Forbidden' in error_msg or 'not authorized' in error_msg.lower():
+                            logger.error(f"403 Forbidden - Service doesn't have permission to publish DPKs")
+                            logger.error(f"This is expected - services running in pods have limited permissions.")
+                            logger.error(f"Falling back to original ResNet DPK: {dpk_name}")
+                            
+                            # Fallback: try to use the original ResNet DPK instead
+                            try:
+                                # Try marketplace first
+                                try:
+                                    original_dpk = dl.dpks.get(dpk_name=dpk_name)
+                                    logger.info(f"Using original DPK from marketplace: {original_dpk.name} v{original_dpk.version}")
+                                    dpk_to_install = original_dpk
+                                    installed_dpk_name = dpk_name  # Use original name
+                                except Exception as get_error:
+                                    error_msg_get = str(get_error)
+                                    if '403' in error_msg_get or 'Forbidden' in error_msg_get:
+                                        logger.warning(f"Service cannot access marketplace DPKs. Checking if app is already installed...")
+                                        # Check if app is already installed (we might have found it earlier)
+                                        if app is None:
+                                            raise Exception(f"Service cannot access marketplace DPKs and no app is installed. Please install ResNet DPK manually.")
+                                        else:
+                                            logger.info(f"Using existing installed app: {app.name}")
+                                            # App is already installed, skip DPK installation
+                                            dpk_to_install = None
+                                    else:
+                                        raise
+                            except Exception as fallback_error:
+                                logger.error(f"Failed to get original DPK: {fallback_error}")
+                                # If we have an app already, we can use it
+                                if app is None:
+                                    raise Exception(f"Permission denied: Service cannot publish or access DPKs. Please install ResNet DPK manually. Error: {error_msg}")
+                                else:
+                                    logger.info(f"Using existing installed app: {app.name}")
+                                    dpk_to_install = None
+                        else:
+                            # Other error - try API as fallback
+                            logger.warning(f"Trying API as fallback...")
+                            publish_response = requests.post(
+                                f"{base_url}/app-registry",
+                                json=dpk_data,
+                                headers=headers
+                            )
+                            if publish_response.status_code == 403:
+                                logger.error(f"403 Forbidden - Service doesn't have permission to publish DPKs")
+                                logger.error(f"Response: {publish_response.text}")
+                                raise Exception(f"Permission denied: Service doesn't have permission to publish DPKs. Please publish manually or grant permissions.")
+                            publish_response.raise_for_status()
+                            published_dpk_data = publish_response.json()
+                            logger.info(f"DPK published via API: {published_dpk_data.get('name')} v{published_dpk_data.get('version')}")
+                            
+                            # Get the published DPK object from SDK
+                            custom_dpk = project.dpks.get(dpk_name=custom_dpk_name)
+                            logger.info(f"Retrieved custom DPK: {custom_dpk.name} v{custom_dpk.version}")
+                            dpk_to_install = custom_dpk
+                    
+                except Exception as e:
+                    logger.error(f"Failed to clone and modify DPK: {e}", exc_info=True)
+                    return {'error': f'Failed to create custom {dpk_name} DPK: {str(e)}'}
+            
+            # Install the DPK (if we have one to install)
+            if dpk_to_install is not None:
+                try:
+                    logger.info(f"Installing DPK: {dpk_to_install.name} v{dpk_to_install.version}")
+                    app = project.apps.install(dpk=dpk_to_install)
+                    logger.info(f"Installed app: {app.name} (ID: {app.id})")
+                    # Update installed_dpk_name to match what was actually installed
+                    installed_dpk_name = dpk_to_install.name
+                    logger.info(f"Using DPK name: {installed_dpk_name} for pipeline node")
+                    
+                    # Wait a bit for the model to be created
+                    logger.info("Waiting 5 seconds for model to be initialized...")
+                    time.sleep(5)
+                except Exception as e:
+                    logger.error(f"Failed to install DPK: {e}")
+                    return {'error': f'Failed to install DPK: {str(e)}'}
+            else:
+                logger.info(f"DPK installation skipped - using existing app: {app.name if app else 'N/A'}")
+                if app:
+                    # Get dpk_name from the existing app
+                    installed_dpk_name = getattr(app, 'dpk_name', dpk_name)
+                    logger.info(f"Using existing app DPK name: {installed_dpk_name}")
+        
+        # Verify app exists before proceeding
+        if app is None:
+            logger.error("No ResNet app found or installed!")
+            return {
+                'error': 'No ResNet app found. Please install the ResNet DPK first.',
+                'dpk_name': dpk_name,
+                'custom_dpk_name': custom_dpk_name
+            }
+        
+        logger.info(f"Using app: {app.name} (ID: {app.id}, dpk_name: {installed_dpk_name})")
+        
+        # Step 2: Get the model from the installed app
+        logger.info("Step 2: Getting model from project...")
+        model = None
+        try:
+            models = list(project.models.list().all())
+            logger.info(f"Found {len(models)} models in project")
+            for m in models:
+                logger.info(f"  - Model: {m.name} (ID: {m.id})")
+                if 'resnet' in m.name.lower():
+                    model = m
+                    logger.info(f"Using model: {model.name} (ID: {model.id})")
+                    break
+            
+            if model is None:
+                logger.error("No ResNet model found in project!")
+                return {
+                    'error': 'No ResNet model found. DPK may not have installed correctly.',
+                    'models_found': [m.name for m in models],
+                    'app_id': app.id if app else None
+                }
+        except Exception as e:
+            logger.error(f"Failed to list models: {e}")
+            return {'error': f'Failed to list models: {str(e)}'}
+        
+        # Step 3: Check if pipeline already exists - delete it to recreate fresh
+        logger.info(f"Step 3: Checking for existing pipeline...")
+        try:
+            existing = project.pipelines.get(pipeline_name=pipeline_name)
+            logger.info(f"Found existing pipeline: {existing.id}. Deleting to recreate...")
+            existing.delete()
+            logger.info("Deleted existing pipeline")
+        except dl.exceptions.NotFound:
+            logger.info("No existing pipeline found")
+        
+        # Step 4: Create new pipeline with 2 nodes: code node (stream-image) -> ResNet
+        logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
+        
+        # Create pipeline
+        pipeline = project.pipelines.create(name=pipeline_name)
+        logger.info(f"Created pipeline: {pipeline.id}")
+        
+        # Add 2 nodes connected: stream-image (code) -> resnet (ml)
+        try:
+            code_node_id = f"stream-image-{self.date_str}"
+            resnet_node_id = f"resnet-{self.date_str}"
+            headers = {'Authorization': f'Bearer {dl.token()}'}
+            base_url = dl.environment()
+            
+            logger.info(f"Adding 2 nodes to pipeline...")
+            
+            # Code node for streaming/downloading image
+            # Root node receives items from batch execution
+            code_node = {
+                "id": code_node_id,
+                "inputs": [
+                    {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
+                ],
+                "outputs": [
+                    {"portId": "item-out", "type": "Item", "name": "item", "displayName": "item", "io": "output"}
+                ],
+                "metadata": {
+                    "serviceConfig": {
+                        "runtime": {
+                            "concurrency": 8,
+                            "autoscaler": {
+                                "type": "rabbitmq",
+                                "minReplicas": 1,
+                                "maxReplicas": 8,
+                                "queueLength": 10
+                            }
+                        }
+                    },
+                    "position": {"x": 10070, "y": 10206, "z": 0},
+                    "componentGroupName": "automation",
+                    "codeApplicationName": "stream-image",
+                    "repeatable": True
+                },
+                "name": "stream-image",
+                "type": "code",
+                "namespace": {
+                    "functionName": "stream_image",
+                    "projectName": project.name,
+                    "serviceName": "stream-image",
+                    "moduleName": "code_module",
+                    "packageName": "stream-image"
+                },
+                "projectId": project.id,
+                "config": {
+                    "package": {
+                        "code": '''import dtlpy as dl
+import io
+import requests
+from PIL import Image
+
+class ServiceRunner:
+
+    def stream_image(self, item):
+        headers = {
+            "Authorization": f"Bearer {dl.token()}"
+        }
+        response = requests.get(item.stream, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        image_data = io.BytesIO(response.content)
+        
+        with Image.open(image_data) as img:
+            img.verify()
+            print(f"Success: Valid {img.format} image downloaded.")
+        return item
+''',
+                        "name": "run",
+                        "type": "code",
+                        "codebase": {"type": "Item"}
+                    }
+                }
+            }
+            
+            # ResNet model node
+            resnet_node = {
+                "id": resnet_node_id,
+                "inputs": [
+                    {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
+                ],
+                "outputs": [
+                    {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "output"},
+                    {"portId": "annotations", "type": "Annotation[]", "name": "annotations", "displayName": "annotations", "io": "output"}
+                ],
+                "metadata": {
+                    "position": {"x": 10405, "y": 10209, "z": 0},
+                    "modelName": model.name,
+                    "modelId": model.id,
+                    "componentGroupName": "models",
+                    "repeatable": True
+                },
+                "name": model.name,
+                "type": "ml",
+                "namespace": {
+                    "functionName": "predict",
+                    "projectName": project.name,
+                    "serviceName": "",
+                    "moduleName": "default_module",
+                    "packageName": dpk_name
+                },
+                "projectId": project.id,
+                "appName": app.name if app else installed_dpk_name,
+                "dpkName": installed_dpk_name
+            }
+            
+            # Connection from code node output to resnet node input
+            connection = {
+                "src": {"nodeId": code_node_id, "portId": "item-out"},
+                "tgt": {"nodeId": resnet_node_id, "portId": "item"},
+                "condition": "{}"
+            }
+            
+            pipeline_update = {
+                "nodes": [code_node, resnet_node],
+                "connections": [connection],
+                "startNodes": [{
+                    "nodeId": code_node_id,
+                    "type": "root",
+                    "id": f"start-{code_node_id}"
+                }]
+            }
+            
+            node_response = requests.patch(
+                f"{base_url}/pipelines/{pipeline.id}",
+                json=pipeline_update,
+                headers=headers
+            )
+            
+            if node_response.status_code != 200:
+                logger.error(f"Pipeline API response: {node_response.status_code} - {node_response.text}")
+                node_response.raise_for_status()
+            
+            logger.info(f"Updated pipeline with node: {node_response.status_code}")
+            
+            # Log the response to verify
+            result = node_response.json()
+            logger.info(f"Pipeline nodes: {len(result.get('nodes', []))}")
+            logger.info(f"Pipeline variables: {result.get('variables', [])}")
+            
+            # Refresh pipeline
+            pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+            
+        except Exception as e:
+            logger.error(f"Failed to update pipeline: {e}")
+            return {
+                'pipeline_id': pipeline.id,
+                'pipeline_name': pipeline.name,
+                'error': f'Pipeline created but failed to add node: {str(e)}',
+                'model_id': model.id,
+                'app_id': app.id if app else None
+            }
+        
+        # Install the pipeline
+        try:
+            pipeline.install()
+            logger.info("Pipeline installed")
+        except Exception as e:
+            logger.warning(f"Could not install pipeline: {e}")
+        
+        return {
+            'pipeline_id': pipeline.id,
+            'pipeline_name': pipeline.name,
+            'project_id': project.id,
+            'status': pipeline.status,
+            'app_id': app.id if app else None,
+            'model_id': model.id if model else None,
+            'message': 'Created pipeline with 2 nodes: stream-image -> ResNet'
+        }
+    
+    def execute_pipeline_batch(self, pipeline_id: str = None, dataset_id: str = None, progress_callback=None) -> dict:
+        """
+        Execute pipeline on all items in dataset.
+        
+        Args:
+            pipeline_id: Pipeline ID to execute (24 character hex string)
+            dataset_id: Dataset ID (default: configured dataset_id)
+        
+        Returns:
+            dict with execution info
+        """
+        if dataset_id is None:
+            dataset_id = self.default_dataset_id
+        
+        # Validate pipeline_id
+        if not pipeline_id or len(pipeline_id) != 24:
+            return {
+                'error': f'Invalid pipeline_id: "{pipeline_id}". Must be a 24 character hex string.',
+                'example': '6970e972f5e45d56fb4c36c0'
+            }
+        
+        logger.info(f"Executing pipeline {pipeline_id} on dataset {dataset_id}")
+        
+        headers = {'Authorization': f'Bearer {dl.token()}'}
+        base_url = dl.environment()
+        
+        # Get dataset to count items
+        dataset = dl.datasets.get(dataset_id=dataset_id)
+        
+        # Build filters for items in the stress-test folder (any date)
+        filters = dl.Filters(resource=dl.FiltersResource.ITEM)
+        filters.add(field='hidden', values=False)
+        filters.add(field='type', values='file')
+        filters.add(field='dir', values='/stress-test/*')
+        
+        # Get item count
+        items_count = dataset.items.list(filters=filters).items_count
+        logger.info(f"Found {items_count} items to process in /stress-test/")
+        
+        if items_count == 0:
+            # Try without folder filter
+            filters2 = dl.Filters(resource=dl.FiltersResource.ITEM)
+            filters2.add(field='hidden', values=False)
+            filters2.add(field='type', values='file')
+            items_count = dataset.items.list(filters=filters2).items_count
+            logger.info(f"Total items in dataset: {items_count}")
+            filters = filters2
+        
+        # Execute batch using correct format from piper source
+        try:
+            filter_obj = filters.prepare()['filter']
+            
+            # Correct format from piper source: batch.query.context.datasets
+            payload = {
+                "batch": {
+                    "query": {
+                        "filter": filter_obj,
+                        "resource": "items",
+                        "context": {
+                            "datasets": [dataset_id]
+                        }
+                    },
+                    "args": {}
+                }
+            }
+            
+            result = None
+            logger.info(f"Trying payload format: {payload}")
+            logger.info(f"POST {base_url}/pipelines/{pipeline_id}/execute")
+            response = requests.post(
+                f"{base_url}/pipelines/{pipeline_id}/execute",
+                json=payload,
+                headers=headers
+            )
+            
+            logger.info(f"API response status: {response.status_code}")
+            batch_execution_id = None
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Batch execution started: {result}")
+                
+                # Extract batch execution ID if available
+                batch_execution_id = result.get('id') or result.get('_id') or result.get('execution_id')
+                logger.info(f"Extracted batch_execution_id: {batch_execution_id}")
+            else:
+                logger.warning(f"Direct API failed: {response.status_code} - {response.text}")
+                # Try using pipeline_executions.create_batch via SDK
+                logger.info("Trying SDK create_batch...")
+                try:
+                    pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
+                    
+                    # Try SDK's pipeline_executions.create_batch
+                    filters_dict = filters.prepare()
+                    logger.info(f"Calling pipeline_executions.create_batch with filters: {filters_dict}")
+                    
+                    # The SDK might handle datasetId internally
+                    batch_result = pipeline.pipeline_executions.create_batch(
+                        filters=filters,
+                        dataset_id=dataset_id
+                    )
+                    logger.info(f"SDK create_batch result: {batch_result}")
+                    
+                    # Extract execution ID from batch_result if it's an object
+                    if hasattr(batch_result, 'id'):
+                        batch_execution_id = batch_result.id
+                    elif isinstance(batch_result, dict):
+                        batch_execution_id = batch_result.get('id') or batch_result.get('_id')
+                    
+                    # Start progress polling in background thread AND wait for completion
+                    if progress_callback:
+                        # Send initial progress update
+                        progress_callback('execute_pipeline_batch', 'running', 85, f'Batch execution started via SDK, waiting for statistics...')
+                        
+                        completion_event = threading.Event()
+                        
+                        def poll_with_completion():
+                            """Wrapper that signals completion"""
+                            try:
+                                logger.info(f"[Poll Thread] Starting polling for pipeline {pipeline_id}, batch_execution_id={batch_execution_id}")
+                                if batch_execution_id:
+                                    logger.info(f"[Poll Thread] Using batch execution progress polling")
+                                    self._poll_batch_execution_progress(pipeline_id, batch_execution_id, items_count, progress_callback)
+                                else:
+                                    logger.info(f"[Poll Thread] Using pipeline state progress polling")
+                                    self._poll_pipeline_state_progress(pipeline_id, items_count, progress_callback)
+                                logger.info(f"[Poll Thread] Polling completed")
+                            except Exception as poll_error:
+                                logger.error(f"[Poll Thread] Error in polling: {poll_error}", exc_info=True)
+                                if progress_callback:
+                                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Polling error: {str(poll_error)}', error=str(poll_error))
+                            finally:
+                                logger.info(f"[Poll Thread] Setting completion event")
+                                completion_event.set()
+                        
+                        # Start polling in background
+                        poll_thread = Thread(target=poll_with_completion, daemon=False)
+                        poll_thread.start()
+                        logger.info(f"[Main Thread] Poll thread started (thread ID: {poll_thread.ident}, is_alive: {poll_thread.is_alive()})")
+                        
+                        # Give polling thread a moment to start
+                        import time as time_module
+                        time_module.sleep(1)
+                        logger.info(f"[Main Thread] Poll thread status after 1s: is_alive={poll_thread.is_alive()}")
+                        
+                        # Wait for completion (with timeout)
+                        logger.info(f"[Main Thread] Waiting for batch execution to complete (max 24 hours)...")
+                        event_set = completion_event.wait(timeout=3600 * 24)  # 24 hour max
+                        
+                        if not event_set:
+                            logger.warning("[Main Thread] Batch execution polling timed out after 24 hours")
+                            return {
+                                'success': False,
+                                'pipeline_id': pipeline_id,
+                                'dataset_id': dataset_id,
+                                'items_count': items_count,
+                                'message': 'Batch execution started but polling timed out',
+                                'timeout': True
+                            }
+                        else:
+                            logger.info("[Main Thread] Batch execution polling completed - event was set")
+                    else:
+                        # No progress callback - just start polling in background without waiting
+                        if batch_execution_id:
+                            Thread(target=self._poll_batch_execution_progress, args=(
+                                pipeline_id, batch_execution_id, items_count, progress_callback
+                            ), daemon=True).start()
+                        else:
+                            Thread(target=self._poll_pipeline_state_progress, args=(
+                                pipeline_id, items_count, progress_callback
+                            ), daemon=True).start()
+                    
+                    return {
+                        'success': True,
+                        'pipeline_id': pipeline_id,
+                        'dataset_id': dataset_id,
+                        'batch_result': str(batch_result),
+                        'items_count': items_count,
+                        'message': 'Batch execution completed via SDK'
+                    }
+                except Exception as sdk_error:
+                    logger.error(f"SDK create_batch also failed: {sdk_error}")
+                    return {
+                        'error': f'All batch API formats failed. SDK error: {str(sdk_error)}',
+                        'pipeline_id': pipeline_id,
+                        'dataset_id': dataset_id
+                    }
+            
+            # Start progress polling in background thread AND wait for completion
+            if progress_callback:
+                # Send initial progress update immediately
+                logger.info(f"[Main Thread] Sending initial progress update for batch execution")
+                progress_callback('execute_pipeline_batch', 'running', 85, f'Batch execution started, initializing polling...')
+                
+                completion_event = threading.Event()
+                
+                def poll_with_completion():
+                    """Wrapper that signals completion"""
+                    try:
+                        logger.info(f"[Poll Thread] Starting polling for pipeline {pipeline_id}, batch_execution_id={batch_execution_id}, items_count={items_count}")
+                        logger.info(f"[Poll Thread] Progress callback available: {progress_callback is not None}")
+                        # Send immediate progress update when polling starts
+                        if progress_callback:
+                            logger.info(f"[Poll Thread] Sending initial polling update")
+                            progress_callback('execute_pipeline_batch', 'running', 85, f'Polling started, waiting for statistics...')
+                            logger.info(f"[Poll Thread] Initial polling update sent")
+                        else:
+                            logger.warning(f"[Poll Thread] No progress callback available!")
+                        
+                        if batch_execution_id:
+                            logger.info(f"[Poll Thread] Using batch execution progress polling")
+                            self._poll_batch_execution_progress(pipeline_id, batch_execution_id, items_count, progress_callback)
+                        else:
+                            logger.info(f"[Poll Thread] Using pipeline state progress polling")
+                            self._poll_pipeline_state_progress(pipeline_id, items_count, progress_callback)
+                        logger.info(f"[Poll Thread] Polling completed normally - all items processed")
+                    except Exception as poll_error:
+                        logger.error(f"[Poll Thread] Error in polling: {poll_error}", exc_info=True)
+                        if progress_callback:
+                            try:
+                                progress_callback('execute_pipeline_batch', 'failed', 95, f'Polling error: {str(poll_error)}', error=str(poll_error))
+                            except Exception as callback_err:
+                                logger.error(f"[Poll Thread] Error in failure callback: {callback_err}")
+                    finally:
+                        logger.info(f"[Poll Thread] Setting completion event to signal main thread")
+                        completion_event.set()
+                        logger.info(f"[Poll Thread] Completion event set - main thread will be notified")
+                
+                # Start polling in background
+                poll_thread = Thread(target=poll_with_completion, daemon=False)
+                poll_thread.start()
+                logger.info(f"[Main Thread] Poll thread started (thread ID: {poll_thread.ident}, is_alive: {poll_thread.is_alive()})")
+                
+                # Give polling thread a moment to start and send first update
+                import time as time_module
+                time_module.sleep(2)  # Give it 2 seconds to start and send first update
+                logger.info(f"[Main Thread] Poll thread status after 2s: is_alive={poll_thread.is_alive()}")
+                
+                # Wait for completion (with timeout)
+                logger.info(f"[Main Thread] Waiting for batch execution to complete (max 24 hours)...")
+                event_set = completion_event.wait(timeout=3600 * 24)  # 24 hour max
+                
+                if not event_set:
+                    logger.warning("[Main Thread] Batch execution polling timed out after 24 hours")
+                    return {
+                        'success': False,
+                        'pipeline_id': pipeline_id,
+                        'dataset_id': dataset_id,
+                        'items_count': items_count,
+                        'message': 'Batch execution started but polling timed out',
+                        'timeout': True
+                    }
+                else:
+                    logger.info("[Main Thread] Batch execution polling completed - event was set")
+                    # Check if polling actually completed successfully or if it was an error
+                    # The polling thread should have logged completion status
+            else:
+                # No progress callback - just start polling in background without waiting
+                logger.warning("[Main Thread] No progress callback - starting polling in background without waiting")
+                if batch_execution_id:
+                    Thread(target=self._poll_batch_execution_progress, args=(
+                        pipeline_id, batch_execution_id, items_count, progress_callback
+                    ), daemon=True).start()
+                else:
+                    Thread(target=self._poll_pipeline_state_progress, args=(
+                        pipeline_id, items_count, progress_callback
+                    ), daemon=True).start()
+                # Return immediately since we're not waiting
+                return {
+                    'success': True,
+                    'pipeline_id': pipeline_id,
+                    'dataset_id': dataset_id,
+                    'items_count': items_count,
+                    'message': f'Batch execution started (polling in background, no progress callback)'
+                }
+            
+        except Exception as e:
+            logger.error(f"execute_batch failed: {e}", exc_info=True)
+            return {
+                'error': f'Failed to execute pipeline: {str(e)}',
+                'pipeline_id': pipeline_id,
+                'dataset_id': dataset_id
+            }
+        
+        logger.info(f"[Main Thread] Batch execution function returning - polling completed")
+        
+        return {
+            'success': True,
+            'pipeline_id': pipeline_id,
+            'dataset_id': dataset_id,
+            'items_count': items_count,
+            'message': f'Batch execution completed on {items_count} items'
+        }
+    
+    def _poll_batch_execution_progress(self, pipeline_id: str, batch_execution_id: str, items_count: int, progress_callback):
+        """Poll batch execution progress using pipeline statistics API only"""
+        import time as time_module
+        start_time = time_module.time()
+        max_poll_time = 3600 * 24  # 24 hours max
+        poll_interval = 5  # Poll every 5 seconds
+        
+        last_success = 0
+        last_failed = 0
+        
+        # Send initial progress update
+        if progress_callback:
+            progress_callback('execute_pipeline_batch', 'running', 85, f'Starting progress polling for {items_count} items...')
+            logger.info(f"[Poll Batch] Initial progress update sent")
+        
+        poll_count = 0
+        logger.info(f"[Poll Batch] Starting polling loop (max_time={max_poll_time}s, interval={poll_interval}s)")
+        while time_module.time() - start_time < max_poll_time:
+            poll_count += 1
+            elapsed_sec = int(time_module.time() - start_time)
+            elapsed_str_loop = f"{elapsed_sec // 60}m {elapsed_sec % 60}s"
+            logger.info(f"[Poll Batch] Poll iteration #{poll_count} (elapsed: {elapsed_str_loop})")
+            try:
+                # Calculate elapsed time
+                elapsed = time_module.time() - start_time
+                elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                
+                # Get pipeline statistics via API directly (don't need pipeline object or execution)
+                # This is the main source of progress info
+                headers = {'Authorization': f'Bearer {dl.token()}'}
+                base_url = dl.environment()
+                
+                try:
+                    # Get pipeline statistics with execution counters
+                    stats_response = requests.get(
+                        f"{base_url}/pipelines/{pipeline_id}/statistics",
+                        headers=headers
+                    )
+                    pipeline_stats = None
+                    if stats_response.status_code == 200:
+                        pipeline_stats = stats_response.json()
+                    elif stats_response.status_code == 404:
+                        # Check if it's pipeline not found or just no statistics yet
+                        error_text = stats_response.text.lower()
+                        if 'pipeline not found' in error_text or ('not found' in error_text and 'statistics' not in error_text):
+                            logger.error(f"[Poll Batch] Pipeline {pipeline_id} not found (404) - pipeline may have been deleted")
+                            if progress_callback:
+                                try:
+                                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
+                                except:
+                                    pass
+                            # Break out of polling loop - can't continue without pipeline
+                            break
+                        else:
+                            # No statistics yet, pipeline might not have started
+                            logger.debug(f"No pipeline statistics found yet for {pipeline_id}")
+                    else:
+                        logger.warning(f"Failed to get pipeline statistics: {stats_response.status_code} - {stats_response.text[:200]}")
+                except Exception as stats_error:
+                    error_msg = str(stats_error)
+                    if '404' in error_msg or 'not found' in error_msg.lower():
+                        logger.error(f"[Poll Batch] Pipeline {pipeline_id} not found - pipeline may have been deleted")
+                        if progress_callback:
+                            try:
+                                progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found', error=f'Pipeline not found: {pipeline_id}')
+                            except:
+                                pass
+                        # Break out of polling loop
+                        break
+                    else:
+                        logger.debug(f"Could not get pipeline statistics via API: {stats_error}")
+                    pipeline_stats = None
+                
+                # Calculate elapsed time (always calculate, even if stats not available)
+                elapsed = time_module.time() - start_time
+                elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                
+                if pipeline_stats:
+                    # Parse execution counters from statistics
+                    execution_counters = pipeline_stats.get('pipelineExecutionCounters', [])
+                    success_count = 0
+                    failed_count = 0
+                    count_in_progress = 0
+                    
+                    for counter in execution_counters:
+                        status = counter.get('status', '').lower()
+                        count = counter.get('count', 0)
+                        if status == 'success':
+                            success_count = count
+                        elif status == 'failed':
+                            failed_count = count
+                        elif status in ['in-progress', 'inprogress', 'running', 'pending']:
+                            count_in_progress = count
+                    
+                    completed = success_count + failed_count
+                    # Only mark as completed if ALL items are done (completed >= items_count)
+                    # AND there are no items in progress
+                    if completed >= items_count and count_in_progress == 0:
+                        pipeline_status = 'completed'
+                    elif count_in_progress > 0 or completed < items_count:
+                        pipeline_status = 'running'
+                    else:
+                        pipeline_status = 'unknown'
+                    
+                    # Calculate progress
+                    progress_pct = (completed / items_count * 100) if items_count > 0 else 0
+                    
+                    # Calculate overall progress first (needed for log callbacks)
+                    overall_progress = 85 + (progress_pct / 100) * 10
+                else:
+                    # Statistics not available yet - show initial progress
+                    success_count = 0
+                    failed_count = 0
+                    count_in_progress = items_count  # Assume all are in progress if stats not available
+                    completed = 0
+                    pipeline_status = 'running'
+                    progress_pct = 0
+                    overall_progress = 85
+                
+                # Update progress with detailed counts - ALWAYS call callback to ensure UI updates
+                # This runs on EVERY poll iteration, regardless of whether stats are available
+                try:
+                    if pipeline_stats:
+                        progress_msg = f"Progress: {completed}/{items_count} items completed ({progress_pct:.1f}%) | Success: {success_count} | Failed: {failed_count} | In Progress: {count_in_progress} | Elapsed: {elapsed_str}"
+                        logger.info(f"[Batch Progress] Stats available: {progress_msg}")
+                    else:
+                        # Statistics not available yet - show waiting message with elapsed time
+                        progress_msg = f"Progress: Waiting for statistics... | Elapsed: {elapsed_str} | Poll #{poll_count}"
+                        logger.info(f"[Batch Progress] No stats yet: {progress_msg}")
+                except Exception as progress_error:
+                    logger.error(f"[Batch Progress] Error building progress message: {progress_error}", exc_info=True)
+                    progress_msg = f"Progress: Polling... | Elapsed: {elapsed_str} | Poll #{poll_count}"
+                
+                # ALWAYS call progress callback on every poll iteration - CRITICAL for UI updates
+                try:
+                    if progress_callback:
+                        logger.info(f"[Poll Batch] Calling progress callback (poll #{poll_count}): {progress_msg[:80]}...")
+                        progress_callback('execute_pipeline_batch', 'running', overall_progress, progress_msg)
+                        logger.info(f"[Poll Batch] ✓ Progress callback completed successfully")
+                    else:
+                        logger.warning(f"[Poll Batch] ⚠ No progress callback provided - UI won't update!")
+                except Exception as callback_error:
+                    logger.error(f"[Poll Batch] ✗ Error calling progress callback: {callback_error}", exc_info=True)
+                
+                last_success = success_count
+                last_failed = failed_count
+                
+                # Check if complete (only if we have stats)
+                if pipeline_stats:
+                        # Only break if ALL items are completed (completed >= items_count)
+                        if pipeline_status == 'completed' and completed >= items_count:
+                            final_msg = f"Batch execution completed: {completed}/{items_count} items processed | Success: {success_count} | Failed: {failed_count} | Time: {elapsed_str}"
+                            logger.info(f"[Poll Batch] Pipeline completed: {final_msg}")
+                            if progress_callback:
+                                try:
+                                    progress_callback('execute_pipeline_batch', 'completed', 95, final_msg)
+                                except Exception as e:
+                                    logger.error(f"[Poll Batch] Error in completion callback: {e}")
+                            break
+                        elif pipeline_status == 'failed':
+                            final_msg = f"Batch execution failed: {completed}/{items_count} items processed | Success: {success_count} | Failed: {failed_count} | Time: {elapsed_str}"
+                            logger.error(f"[Poll Batch] Pipeline failed: {final_msg}")
+                            if progress_callback:
+                                try:
+                                    progress_callback('execute_pipeline_batch', 'failed', 95, final_msg, error="Pipeline execution failed")
+                                except Exception as e:
+                                    logger.error(f"[Poll Batch] Error in failure callback: {e}")
+                            break
+                
+                time_module.sleep(poll_interval)
+                
+            except Exception as e:
+                logger.error(f"[Poll Batch] Error in polling loop: {e}", exc_info=True)
+                # Still try to send progress update even on error
+                if progress_callback:
+                    try:
+                        elapsed = time_module.time() - start_time
+                        elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                        progress_callback('execute_pipeline_batch', 'running', 85, f'Polling error (retrying): {str(e)[:50]}... | Elapsed: {elapsed_str}')
+                    except:
+                        pass
+                time_module.sleep(poll_interval)
+    
+    def _poll_pipeline_state_progress(self, pipeline_id: str, items_count: int, progress_callback):
+        """Poll pipeline state for execution progress and fetch execution logs"""
+        import time as time_module
+        start_time = time_module.time()
+        max_poll_time = 3600 * 24  # 24 hours max
+        poll_interval = 5  # Poll every 5 seconds
+        
+        last_completed = 0
+        seen_execution_ids = set()  # Track which executions we've already logged
+        
+        # Send initial progress update
+        if progress_callback:
+            progress_callback('execute_pipeline_batch', 'running', 85, f'Starting progress polling for {items_count} items...')
+            logger.info(f"[Poll Pipeline State] Initial progress update sent")
+        
+        poll_count = 0
+        while time_module.time() - start_time < max_poll_time:
+            poll_count += 1
+            logger.info(f"[Poll Pipeline State] Poll iteration #{poll_count} (elapsed: {int((time_module.time() - start_time) // 60)}m {int((time_module.time() - start_time) % 60)}s)")
+            try:
+                # Get pipeline statistics via API directly (don't need pipeline object)
+                # This is more accurate than state and doesn't require the pipeline object
+                headers = {'Authorization': f'Bearer {dl.token()}'}
+                base_url = dl.environment()
+                
+                try:
+                    # Get pipeline statistics with execution counters
+                    stats_response = requests.get(
+                        f"{base_url}/pipelines/{pipeline_id}/statistics",
+                        headers=headers
+                    )
+                    pipeline_stats = None
+                    if stats_response.status_code == 200:
+                        pipeline_stats = stats_response.json()
+                    elif stats_response.status_code == 404:
+                        # Check if it's pipeline not found or just no statistics yet
+                        error_text = stats_response.text.lower()
+                        if 'pipeline not found' in error_text or ('not found' in error_text and 'statistics' not in error_text):
+                            logger.error(f"[Poll Pipeline State] Pipeline {pipeline_id} not found (404) - pipeline may have been deleted")
+                            if progress_callback:
+                                try:
+                                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found - may have been deleted', error=f'Pipeline not found: {pipeline_id}')
+                                except:
+                                    pass
+                            # Break out of polling loop - can't continue without pipeline
+                            break
+                        else:
+                            # No statistics yet, pipeline might not have started
+                            logger.debug(f"No pipeline statistics found yet for {pipeline_id}")
+                    else:
+                        logger.warning(f"Failed to get pipeline statistics: {stats_response.status_code} - {stats_response.text[:200]}")
+                except Exception as stats_error:
+                    error_msg = str(stats_error)
+                    if '404' in error_msg or 'not found' in error_msg.lower():
+                        logger.error(f"[Poll Pipeline State] Pipeline {pipeline_id} not found - pipeline may have been deleted")
+                        if progress_callback:
+                            try:
+                                progress_callback('execute_pipeline_batch', 'failed', 95, f'Pipeline {pipeline_id} not found', error=f'Pipeline not found: {pipeline_id}')
+                            except:
+                                pass
+                        # Break out of polling loop
+                        break
+                    else:
+                        logger.debug(f"Could not get pipeline statistics via API: {stats_error}")
+                    pipeline_stats = None
+                
+                # Calculate elapsed time (always calculate, even if stats not available)
+                elapsed = time_module.time() - start_time
+                elapsed_str = f"{int(elapsed // 60)}m {int(elapsed % 60)}s"
+                
+                if pipeline_stats:
+                    # Parse execution counters from statistics
+                    execution_counters = pipeline_stats.get('pipelineExecutionCounters', [])
+                    success_count = 0
+                    failed_count = 0
+                    count_in_progress = 0
+                    
+                    for counter in execution_counters:
+                        status = counter.get('status', '').lower()
+                        count = counter.get('count', 0)
+                        if status == 'success':
+                            success_count = count
+                        elif status == 'failed':
+                            failed_count = count
+                        elif status in ['in-progress', 'inprogress', 'running', 'pending']:
+                            count_in_progress = count
+                    
+                    completed = success_count + failed_count
+                    # Only mark as completed if ALL items are done (completed >= items_count)
+                    # AND there are no items in progress
+                    if completed >= items_count and count_in_progress == 0:
+                        pipeline_status = 'completed'
+                    elif count_in_progress > 0 or completed < items_count:
+                        pipeline_status = 'running'
+                    else:
+                        pipeline_status = 'unknown'
+                    
+                    # Calculate progress
+                    progress_pct = (completed / items_count * 100) if items_count > 0 else 0
+                    
+                    # Calculate overall progress (needed for log callbacks)
+                    overall_progress = 85 + (progress_pct / 100) * 10
+                else:
+                    # Statistics not available yet - show initial progress
+                    success_count = 0
+                    failed_count = 0
+                    count_in_progress = items_count  # Assume all are in progress if stats not available
+                    completed = 0
+                    pipeline_status = 'running'
+                    progress_pct = 0
+                    overall_progress = 85
+                    
+                    # Try to fetch execution logs for visibility
+                    try:
+                        project_id = pipeline.project.id
+                        project = dl.projects.get(project_id=project_id)
+                        
+                        # Get recent executions for log display
+                        execution_filters = dl.Filters(resource=dl.FiltersResource.EXECUTION)
+                        execution_filters.add(field='pipeline.id', values=pipeline_id)
+                        execution_filters.add(field='status', values=['running', 'inprogress', 'pending', 'completed', 'success', 'failed'])
+                        execution_filters.sort_by(field='created_at', value=dl.FiltersOrderByDirection.DESCENDING)
+                        
+                        recent_executions = project.executions.list(filters=execution_filters, page_size=10)
+                        
+                        for execution in recent_executions.items[:5]:  # Process top 5
+                            exec_id = execution.id
+                            if exec_id not in seen_execution_ids:
+                                seen_execution_ids.add(exec_id)
+                                
+                                # Try to get logs for this execution
+                                try:
+                                    # Get execution logs
+                                    exec_logs = project.logs.list(execution_id=exec_id, page_size=20)
+                                    
+                                    if exec_logs and len(exec_logs) > 0:
+                                        # Log the most recent log entries
+                                        for log_entry in exec_logs[-5:]:  # Last 5 log entries
+                                            log_msg = log_entry.get('message', '')
+                                            log_level = log_entry.get('level', 'INFO')
+                                            log_func = log_entry.get('function_name', '')
+                                            
+                                            if log_msg:
+                                                log_display = f"[Execution {exec_id[:8]}...] {log_func}: {log_msg}"
+                                                if progress_callback:
+                                                    progress_callback('execute_pipeline_batch', 'running', overall_progress, log_display)
+                                                logger.info(f"Execution log: {log_display}")
+                                    
+                                    # Also log execution status
+                                    exec_status = execution.status
+                                    if exec_status in ['completed', 'success', 'failed']:
+                                        status_msg = f"Execution {exec_id[:8]}... {exec_status}"
+                                        if progress_callback:
+                                            progress_callback('execute_pipeline_batch', 'running', overall_progress, status_msg)
+                                        logger.info(status_msg)
+                                        
+                                except Exception as log_error:
+                                    # Log fetching is optional, don't fail the whole polling
+                                    logger.debug(f"Could not fetch logs for execution {exec_id}: {log_error}")
+                                    
+                    except Exception as exec_error:
+                        # Execution log fetching is optional
+                        logger.debug(f"Could not fetch execution logs: {exec_error}")
+                    
+                    # Update progress with detailed counts - ALWAYS call callback to ensure UI updates
+                    if pipeline_stats:
+                        progress_msg = f"Progress: {completed}/{items_count} items completed ({progress_pct:.1f}%) | Success: {success_count} | Failed: {failed_count} | In Progress: {count_in_progress} | Elapsed: {elapsed_str}"
+                    else:
+                        # Statistics not available yet - show waiting message
+                        progress_msg = f"Progress: Waiting for statistics... | Elapsed: {elapsed_str}"
+                    
+                    if progress_callback:
+                        progress_callback('execute_pipeline_batch', 'running', overall_progress, progress_msg)
+                    logger.info(f"[Batch Progress] {progress_msg}")
+                    last_completed = completed
+                    
+                    # Check if complete (only if we have stats)
+                    if pipeline_stats:
+                        # Only break if ALL items are completed (completed >= items_count)
+                        if pipeline_status == 'completed' and completed >= items_count:
+                            final_msg = f"Batch execution completed: {completed}/{items_count} items processed | Success: {success_count} | Failed: {failed_count} | Time: {elapsed_str}"
+                            logger.info(f"[Poll Pipeline State] Pipeline completed: {final_msg}")
+                            if progress_callback:
+                                progress_callback('execute_pipeline_batch', 'completed', 95, final_msg)
+                            break
+                        elif pipeline_status == 'failed':
+                            final_msg = f"Batch execution failed: {completed}/{items_count} items processed | Success: {success_count} | Failed: {failed_count} | Time: {elapsed_str}"
+                            logger.error(f"[Poll Pipeline State] Pipeline failed: {final_msg}")
+                            if progress_callback:
+                                progress_callback('execute_pipeline_batch', 'failed', 95, final_msg, error="Pipeline execution failed")
+                            break
+                
+                time_module.sleep(poll_interval)
+                
+            except Exception as e:
+                logger.warning(f"Error polling pipeline state progress: {e}")
+                time_module.sleep(poll_interval)
+    
+    def run_full_stress_test(self, 
+                             max_images: int = 50000,
+                             dataset_id: str = None,
+                             project_id: str = None,
+                             dataset_name: str = None,
+                             driver_id: str = None,
+                             pipeline_name: str = None,
+                             num_workers: int = 50,
+                             coco_dataset: str = 'all',
+                             create_dataset: bool = False,
+                             skip_download: bool = False,
+                             skip_link_items: bool = False,
+                             skip_pipeline: bool = False,
+                             skip_execute: bool = False,
+                             link_base_url: str = None,
+                             progress_callback=None) -> dict:
+        """
+        Run the full stress test flow:
+        0. (Optional) Create dataset if it doesn't exist
+        1. Download COCO images to NFS (up to 123k from train+val) - AUTO-SKIPPED if dataset has items
+        2. Create link items in dataset - AUTO-SKIPPED if dataset has items
+        3. Create pipeline
+        4. Execute pipeline batch
+        
+        Args:
+            max_images: Number of images to download (default: 50000)
+            dataset_id: Dataset ID for link items (will be created if create_dataset=True and doesn't exist).
+                       If dataset already has items, download and link_items steps will be auto-skipped.
+            project_id: Project ID (required if creating dataset and default_dataset_id doesn't exist)
+            dataset_name: Dataset name (used if creating dataset)
+            driver_id: Driver ID for dataset creation (default: 'rubiks_internal_faas_proxy_driver')
+            pipeline_name: Name for the pipeline
+            num_workers: Number of parallel download workers
+            coco_dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
+            create_dataset: Create dataset if it doesn't exist (default: False)
+            skip_download: Skip image download step (also auto-skipped if dataset has items)
+            skip_link_items: Skip link item creation (also auto-skipped if dataset has items)
+            skip_pipeline: Skip pipeline creation
+            skip_execute: Skip pipeline execution
+            link_base_url: Base URL for link items (overrides instance default)
+        
+        Returns:
+            dict with full results
+        """
+        results = {
+            'date': self.date_str,
+            'storage_path': self.storage_path,
+            'max_images': max_images,
+            'steps': []
+        }
+        
+        # Step 0: Create dataset if needed
+        if create_dataset:
+            if progress_callback:
+                progress_callback('create_dataset', 'running', 5, 'Creating/Getting dataset...')
+            logger.info("=" * 60)
+            logger.info("STEP 0: Creating/Getting dataset")
+            logger.info("=" * 60)
+            
+            dataset_result = self.create_dataset(
+                project_id=project_id, 
+                dataset_name=dataset_name,
+                driver_id=driver_id
+            )
+            results['steps'].append({
+                'step': 'create_dataset',
+                'result': dataset_result
+            })
+            
+            if 'error' in dataset_result:
+                logger.error(f"Failed to create/get dataset: {dataset_result['error']}")
+                results['error'] = dataset_result['error']
+                if progress_callback:
+                    progress_callback('create_dataset', 'failed', 5, f"Failed: {dataset_result['error']}", error=dataset_result['error'])
+                return results
+            
+            dataset_id = dataset_result['dataset_id']
+            results['dataset_id'] = dataset_id
+            logger.info(f"Using dataset: {dataset_id}")
+            if progress_callback:
+                progress_callback('create_dataset', 'completed', 10, f'Dataset ready: {dataset_id}')
+        else:
+            # Use provided dataset_id or default
+            if dataset_id is None:
+                dataset_id = self.default_dataset_id
+            results['dataset_id'] = dataset_id
+            if progress_callback:
+                progress_callback('create_dataset', 'skipped', 5, f'Using existing dataset: {dataset_id}')
+        
+        # Check if dataset exists and has items - if so, skip download and link_items
+        dataset_has_items = False
+        items_count = 0
+        if dataset_id:
+            try:
+                dataset = dl.datasets.get(dataset_id=dataset_id)
+                # Check if dataset has items in /stress-test/ folder (any date)
+                filters = dl.Filters(resource=dl.FiltersResource.ITEM)
+                filters.add(field='hidden', values=False)
+                filters.add(field='type', values='file')
+                filters.add(field='dir', values='/stress-test/*')
+                items_count = dataset.items.list(filters=filters).items_count
+                
+                if items_count == 0:
+                    # Try without folder filter to check total items
+                    filters2 = dl.Filters(resource=dl.FiltersResource.ITEM)
+                    filters2.add(field='hidden', values=False)
+                    filters2.add(field='type', values='file')
+                    items_count = dataset.items.list(filters=filters2).items_count
+                
+                dataset_has_items = items_count > 0
+                
+                if dataset_has_items:
+                    logger.info(f"Dataset {dataset_id} already has {items_count} items - will skip download and link_items steps")
+                    if progress_callback:
+                        progress_callback('dataset_check', 'completed', 10, f'Dataset has {items_count} items - skipping download and link creation')
+            except Exception as e:
+                logger.warning(f"Could not check dataset items: {e}")
+                dataset_has_items = False
+        
+        filenames = []
+        
+        # Step 1: Download images
+        # Auto-skip if dataset has items (unless explicitly requested)
+        should_skip_download = skip_download or dataset_has_items
+        if not should_skip_download:
+            if progress_callback:
+                progress_callback('download_images', 'running', 15, f'Downloading {max_images} COCO images...')
+            logger.info("=" * 60)
+            logger.info(f"STEP 1: Downloading {max_images} COCO images")
+            logger.info("=" * 60)
+            
+            download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
+            results['steps'].append({
+                'step': 'download_images',
+                'result': download_result
+            })
+            filenames = download_result.get('files', [])
+            if progress_callback:
+                progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
+        else:
+            # Get existing files
+            if os.path.exists(self.storage_path):
+                filenames = [f for f in os.listdir(self.storage_path) 
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+            skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
+            results['steps'].append({'step': 'download_images', 'skipped': True, 'reason': skip_reason, 'existing_files': len(filenames), 'dataset_items': items_count})
+            if progress_callback:
+                if dataset_has_items:
+                    progress_callback('download_images', 'skipped', 15, f'Skipped: Dataset already has {items_count} items')
+                else:
+                    progress_callback('download_images', 'skipped', 15, f'Using {len(filenames)} existing images')
+        
+        # Step 2: Create link items
+        # Auto-skip if dataset has items (unless explicitly requested)
+        should_skip_link_items = skip_link_items or dataset_has_items
+        if not should_skip_link_items:
+            if progress_callback:
+                progress_callback('create_link_items', 'running', 45, f'Creating {len(filenames)} link items...')
+            logger.info("=" * 60)
+            logger.info(f"STEP 2: Creating {len(filenames)} link items")
+            logger.info("=" * 60)
+            
+            link_result = self.create_link_items(
+                dataset_id=dataset_id, 
+                filenames=filenames, 
+                num_workers=num_workers,
+                progress_callback=progress_callback,
+                link_base_url=link_base_url,
+                project_id=project_id
+            )
+            results['steps'].append({
+                'step': 'create_link_items',
+                'result': link_result
+            })
+            if progress_callback:
+                created = link_result.get('created', 0)
+                progress_callback('create_link_items', 'completed', 60, f'Created {created} link items')
+        else:
+            skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
+            results['steps'].append({'step': 'create_link_items', 'skipped': True, 'reason': skip_reason, 'dataset_items': items_count})
+            if progress_callback:
+                if dataset_has_items:
+                    progress_callback('create_link_items', 'skipped', 45, f'Skipped: Dataset already has {items_count} items')
+                else:
+                    progress_callback('create_link_items', 'skipped', 45, 'Skipped link items creation')
+        
+        # Step 3: Create pipeline
+        pipeline_id = None
+        logger.info("=" * 60)
+        logger.info(f"STEP 3: Checking pipeline creation - skip_pipeline={skip_pipeline}")
+        logger.info("=" * 60)
+        if progress_callback:
+            progress_callback('pipeline_check', 'running', 60, f'Checking pipeline creation: skip_pipeline={skip_pipeline}')
+            logger.info(f"[Progress] Sent pipeline_check update: skip_pipeline={skip_pipeline}")
+        
+        if not skip_pipeline:
+            logger.info(f"[Step 3] Pipeline creation NOT skipped - proceeding with creation")
+            if progress_callback:
+                progress_callback('create_pipeline', 'running', 65, 'Creating pipeline with ResNet...')
+            logger.info("=" * 60)
+            logger.info("STEP 3: Creating pipeline")
+            logger.info("=" * 60)
+            
+            pipeline_result = self.create_pipeline(pipeline_name=pipeline_name, project_id=project_id)
+            logger.info(f"create_pipeline returned: {pipeline_result}")
+            results['steps'].append({
+                'step': 'create_pipeline',
+                'result': pipeline_result
+            })
+            pipeline_id = pipeline_result.get('pipeline_id')
+            logger.info(f"Extracted pipeline_id: {pipeline_id}")
+            if progress_callback:
+                if 'error' in pipeline_result:
+                    error_msg = pipeline_result.get('error', 'Unknown error')
+                    logger.error(f"Pipeline creation failed: {error_msg}")
+                    progress_callback('create_pipeline', 'failed', 65, f"Failed: {error_msg}", error=error_msg)
+                else:
+                    logger.info(f"Pipeline created successfully: {pipeline_id}")
+                    progress_callback('create_pipeline', 'completed', 80, f'Pipeline created: {pipeline_id}')
+        else:
+            logger.warning("=" * 60)
+            logger.warning("STEP 3: Pipeline creation SKIPPED (skip_pipeline=True)")
+            logger.warning("=" * 60)
+            if progress_callback:
+                progress_callback('create_pipeline', 'skipped', 65, 'Skipped pipeline creation')
+                logger.info(f"[Progress] Sent create_pipeline skipped update")
+            results['steps'].append({'step': 'create_pipeline', 'skipped': True, 'reason': 'skip_pipeline=True'})
+            logger.warning(f"[Step 3] Pipeline creation was skipped - pipeline_id will be None")
+        
+        # Step 4: Execute pipeline batch
+        logger.info("=" * 60)
+        logger.info(f"STEP 4: Checking batch execution - skip_execute={skip_execute}, pipeline_id={pipeline_id}")
+        logger.info("=" * 60)
+        if progress_callback:
+            progress_callback('execute_check', 'running', 82, f'Checking execution conditions: skip_execute={skip_execute}, pipeline_id={pipeline_id}')
+        
+        if not skip_execute and pipeline_id:
+            logger.info(f"✓ Conditions met: skip_execute=False, pipeline_id={pipeline_id} - proceeding with batch execution")
+            if progress_callback:
+                progress_callback('execute_pipeline_batch', 'running', 85, 'Executing pipeline batch...')
+            logger.info("=" * 60)
+            logger.info("STEP 4: Executing pipeline batch")
+            logger.info("=" * 60)
+            
+            logger.info(f"Starting batch execution for pipeline {pipeline_id} on dataset {dataset_id}")
+            if progress_callback:
+                progress_callback('execute_pipeline_batch', 'running', 85, f'Starting batch execution on pipeline {pipeline_id}...')
+            
+            logger.info(f"[Workflow] About to call execute_pipeline_batch - this will wait for batch execution to complete")
+            execute_result = self.execute_pipeline_batch(
+                pipeline_id=pipeline_id,
+                dataset_id=dataset_id,
+                progress_callback=progress_callback
+            )
+            
+            logger.info(f"[Workflow] execute_pipeline_batch returned: {execute_result}")
+            logger.info(f"[Workflow] Checking if batch execution actually completed...")
+            
+            results['steps'].append({
+                'step': 'execute_pipeline_batch',
+                'result': execute_result
+            })
+            
+            if progress_callback:
+                items_count = execute_result.get('items_count', 0)
+                if execute_result.get('timeout'):
+                    logger.warning(f"[Workflow] Batch execution timed out after 24 hours")
+                    progress_callback('execute_pipeline_batch', 'failed', 95, f'Batch execution timed out after 24 hours', error='Timeout')
+                elif 'error' in execute_result:
+                    error_msg = execute_result.get('error', 'Unknown error')
+                    logger.error(f"[Workflow] Batch execution failed: {error_msg}")
+                    progress_callback('execute_pipeline_batch', 'failed', 95, f"Failed: {error_msg}", error=error_msg)
+                elif execute_result.get('success'):
+                    logger.info(f"[Workflow] Batch execution completed successfully on {items_count} items")
+                    progress_callback('execute_pipeline_batch', 'completed', 95, f'Batch execution completed on {items_count} items')
+                else:
+                    logger.warning(f"[Workflow] Batch execution returned but success status unclear: {execute_result}")
+                    progress_callback('execute_pipeline_batch', 'completed', 95, f'Batch execution finished (status unclear)')
+        else:
+            skip_reason = 'skip_execute=True' if skip_execute else f'pipeline_id is None (pipeline creation may have failed)'
+            logger.warning("=" * 60)
+            logger.warning(f"STEP 4: Pipeline execution SKIPPED - {skip_reason}")
+            logger.warning(f"STEP 4: skip_execute={skip_execute}, pipeline_id={pipeline_id}")
+            logger.warning("=" * 60)
+            if progress_callback:
+                progress_callback('execute_pipeline_batch', 'skipped', 85, f'Skipped pipeline execution: {skip_reason}')
+                logger.info(f"[Progress] Sent execute_pipeline_batch skipped update: {skip_reason}")
+            results['steps'].append({'step': 'execute_pipeline_batch', 'skipped': True, 'reason': skip_reason})
+            logger.warning(f"[Step 4] Batch execution was skipped - workflow will complete without executing batch")
+        
+        # Check if we actually executed the batch
+        executed_batch = any(step.get('step') == 'execute_pipeline_batch' and not step.get('skipped') for step in results['steps'])
+        logger.info("=" * 60)
+        logger.info(f"Workflow completion check: executed_batch={executed_batch}")
+        steps_summary = [f"{s.get('step')}: {'skipped' if s.get('skipped') else 'executed'}" for s in results['steps']]
+        logger.info(f"All steps: {steps_summary}")
+        logger.info("=" * 60)
+        
+        if not executed_batch:
+            logger.warning("=" * 60)
+            logger.warning("WARNING: Pipeline batch execution was not performed!")
+            logger.warning("WARNING: Check if pipeline was created and skip_execute flag.")
+            logger.warning("=" * 60)
+            if progress_callback:
+                progress_callback('warning', 'warning', 100, 'Workflow completed but batch execution was not performed', result=results)
+        
+        results['success'] = True
+        logger.info("=" * 60)
+        logger.info("STRESS TEST COMPLETE")
+        logger.info("=" * 60)
+        logger.info(f"Steps completed: {[step.get('step') for step in results['steps']]}")
+        logger.info(f"Executed batch: {executed_batch}")
+        logger.info("=" * 60)
+        
+        if progress_callback:
+            completion_msg = 'Workflow completed successfully' if executed_batch else 'Workflow completed but batch execution was not performed'
+            progress_callback('complete', 'completed', 100, completion_msg, result=results)
+            logger.info(f"[Progress] Sent workflow completion update: {completion_msg}")
+        
+        return results
+    
+    def run(self):
+        """This method is called by Dataloop, but for custom servers we start in __init__"""
+        # Server is already started in __init__, just log that we're ready
+        logger.info("StressTestServer.run() called - server should already be running")
+        # Keep the main thread alive
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("Shutting down server...")
+            if self.server:
+                self.server.shutdown()
+
+
+if __name__ == '__main__':
+    # For local testing
+    server = StressTestServer()
+    server.run()
