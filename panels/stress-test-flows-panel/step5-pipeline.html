@@ -49,6 +49,18 @@
         .resnet-item .label { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
         .resnet-item .value { font-size: 13px; font-weight: 600; }
 
+        .scaling-section { background: linear-gradient(135deg, rgba(14, 165, 233, 0.08), rgba(99, 102, 241, 0.05)); border: 1px solid var(--accent-primary); border-radius: 16px; padding: 24px; margin-bottom: 24px; }
+        .scaling-section h3 { font-size: 16px; color: var(--accent-primary); margin-bottom: 20px; }
+        .scaling-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+        .scaling-card { background: var(--bg-card); border-radius: 12px; padding: 18px; border: 1px solid var(--border-color); }
+        .scaling-card h4 { font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-primary); display: flex; align-items: center; gap: 8px; }
+        .scaling-card .description { font-size: 12px; color: var(--text-secondary); margin-bottom: 14px; line-height: 1.5; }
+        .scaling-specs { display: flex; flex-direction: column; gap: 8px; }
+        .scaling-spec-row { display: flex; justify-content: space-between; align-items: center; font-size: 12px; padding: 8px 12px; background: var(--bg-tertiary); border-radius: 8px; }
+        .scaling-spec-label { color: var(--text-muted); font-weight: 500; }
+        .scaling-spec-value { font-family: 'JetBrains Mono', monospace; color: var(--accent-primary); font-weight: 600; }
+        .scaling-warning { background: rgba(245, 158, 11, 0.1); border: 1px solid var(--accent-warning); border-radius: 8px; padding: 12px; margin-top: 12px; font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+
         .code-block { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-primary); overflow-x: auto; white-space: pre; }
         .code-block.large { padding: 20px; }
 
@@ -94,6 +106,12 @@
                         <div class="type">Input Node</div>
                     </div>
                     <span class="pipeline-arrow">→</span>
+                    <div class="pipeline-node" style="border-color: var(--accent-primary); background: rgba(14, 165, 233, 0.05);">
+                        <div class="icon">📝</div>
+                        <div class="label">Stream Image</div>
+                        <div class="type">Code Node</div>
+                    </div>
+                    <span class="pipeline-arrow">→</span>
                     <div class="pipeline-node resnet">
                         <div class="icon">🤖</div>
                         <div class="label">ResNet Classify</div>
@@ -117,6 +135,82 @@
                 <div class="resnet-item"><div class="label">Input</div><div class="value">Image Item</div></div>
                 <div class="resnet-item"><div class="label">Output</div><div class="value">Predictions</div></div>
                 <div class="resnet-item"><div class="label">GPU</div><div class="value">Optional</div></div>
+            </div>
+        </div>
+
+        <div class="scaling-section">
+            <h3>⚙️ Scaling Configuration</h3>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 20px;">
+                Configure maxReplicas for each service to control scaling behavior during stress testing. These settings determine how many pods can be created for each pipeline node.
+            </p>
+            <div class="scaling-grid">
+                <div class="scaling-card">
+                    <h4>📝 Code Node (Stream Image)</h4>
+                    <div class="description">
+                        Mimics annotator streaming behavior. Downloads/streams images from Filestore for pipeline processing.
+                    </div>
+                    <div class="scaling-specs">
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Min Replicas</span>
+                            <span class="scaling-spec-value">1</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Max Replicas</span>
+                            <span class="scaling-spec-value">8 (configurable)</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Concurrency</span>
+                            <span class="scaling-spec-value">8</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Queue Length</span>
+                            <span class="scaling-spec-value">10</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Autoscaler Type</span>
+                            <span class="scaling-spec-value">rabbitmq</span>
+                        </div>
+                    </div>
+                    <div class="scaling-warning">
+                        <strong>⚠️ Configuration:</strong> Adjust maxReplicas based on expected load. Higher values allow more parallel image streaming but consume more resources.
+                    </div>
+                </div>
+                <div class="scaling-card">
+                    <h4>🤖 ResNet Function Service</h4>
+                    <div class="description">
+                        ML function for image classification. Processes images received from the code node.
+                    </div>
+                    <div class="scaling-specs">
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Min Replicas</span>
+                            <span class="scaling-spec-value">1 (configurable)</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Max Replicas</span>
+                            <span class="scaling-spec-value">8 (configurable)</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">Autoscaler Type</span>
+                            <span class="scaling-spec-value">rabbitmq</span>
+                        </div>
+                        <div class="scaling-spec-row">
+                            <span class="scaling-spec-label">GPU Support</span>
+                            <span class="scaling-spec-value">Optional</span>
+                        </div>
+                    </div>
+                    <div class="scaling-warning">
+                        <strong>⚠️ Configuration:</strong> Set maxReplicas for ResNet service based on classification throughput requirements. Consider GPU availability if using GPU-enabled pods.
+                    </div>
+                </div>
+            </div>
+            <div style="background: rgba(14, 165, 233, 0.08); border-radius: 10px; padding: 16px; margin-top: 20px;">
+                <h4 style="font-size: 13px; color: var(--accent-primary); margin-bottom: 8px;">📋 Scaling Decision Guidelines</h4>
+                <ul style="font-size: 12px; color: var(--text-secondary); line-height: 1.8; padding-left: 20px; margin: 0;">
+                    <li><strong>Code Node:</strong> Set maxReplicas based on expected concurrent image streams. Default: 8 replicas handles moderate load.</li>
+                    <li><strong>ResNet Service:</strong> Configure maxReplicas to match classification capacity needs. Consider batch size and processing time.</li>
+                    <li><strong>Load Testing:</strong> Start with lower maxReplicas and increase based on observed queue lengths and processing times.</li>
+                    <li><strong>Resource Limits:</strong> Ensure cluster has sufficient resources (CPU/memory/GPU) to support configured maxReplicas.</li>
+                </ul>
             </div>
         </div>
 

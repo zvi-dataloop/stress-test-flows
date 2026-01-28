@@ -306,6 +306,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._execute_service_function(data)
         elif parsed.path == '/api/run-full':
             self._run_full_workflow(data)
+        elif parsed.path.startswith('/api/cancel-workflow/'):
+            workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
+            self._cancel_workflow(workflow_id)
         else:
             self._send_error(404, 'Not Found')
     
@@ -696,6 +699,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             
             server = _stress_test_server_instance
             
+            # Store workflow_id in server instance for pipeline_id tracking
+            server._current_workflow_id = workflow_id
+            
             # Call run_full_stress_test with progress callback
             result = server.run_full_stress_test(
                 max_images=max_images,
@@ -715,6 +721,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 progress_callback=update_progress
             )
             
+            # Clear workflow_id after completion
+            server._current_workflow_id = None
+            
             if result.get('success'):
                 update_progress('complete', 'completed', 100, 'Workflow completed successfully', result=result)
             else:
@@ -722,6 +731,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 
         except Exception as e:
             logger.error(f"Workflow async error: {e}", exc_info=True)
+            # Clear workflow_id on error
+            if _stress_test_server_instance:
+                _stress_test_server_instance._current_workflow_id = None
             if workflow_id in workflow_progress:
                 workflow_progress[workflow_id]['status'] = 'failed'
                 workflow_progress[workflow_id]['error'] = str(e)
@@ -747,6 +759,147 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._send_json(progress)
         except Exception as e:
             logger.error(f"Get workflow progress error: {e}", exc_info=True)
+            self._send_error(500, str(e))
+    
+    def _cancel_workflow(self, workflow_id):
+        """Cancel a running workflow by uninstalling and deleting the pipeline"""
+        try:
+            if workflow_id not in workflow_progress:
+                self._send_error(404, f'Workflow {workflow_id} not found')
+                return
+            
+            progress = workflow_progress[workflow_id]
+            
+            # Check if workflow is already completed or failed
+            if progress.get('status') in ['completed', 'failed', 'cancelled']:
+                self._send_json({
+                    'success': False,
+                    'message': f'Workflow is already {progress.get("status")} and cannot be cancelled'
+                })
+                return
+            
+            # Mark as cancelling
+            progress['status'] = 'cancelling'
+            progress['logs'].append({
+                'timestamp': time.time(),
+                'step': 'cancel',
+                'level': 'INFO',
+                'message': 'Cancellation requested - uninstalling and deleting pipeline...'
+            })
+            
+            # Get pipeline_id from result
+            pipeline_id = None
+            if progress.get('result'):
+                # Try to get from result directly
+                pipeline_id = progress['result'].get('pipeline_id')
+                if not pipeline_id:
+                    # Try to get from steps
+                    steps = progress['result'].get('steps', [])
+                    for step in steps:
+                        if step.get('step') == 'create_pipeline':
+                            step_result = step.get('result', {})
+                            pipeline_id = step_result.get('pipeline_id')
+                            break
+            
+            if not pipeline_id:
+                # Try to get from current step result
+                if progress.get('current_step') == 'create_pipeline':
+                    # Pipeline might be in progress, try to get from logs or wait
+                    logger.warning(f"Pipeline ID not found in workflow {workflow_id} result")
+                    progress['status'] = 'cancelled'
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'WARNING',
+                        'message': 'Pipeline ID not found - workflow cancelled but pipeline may need manual cleanup'
+                    })
+                    self._send_json({
+                        'success': True,
+                        'message': 'Workflow cancelled (pipeline ID not found - may need manual cleanup)'
+                    })
+                    return
+            
+            logger.info(f"Cancelling workflow {workflow_id} - uninstalling and deleting pipeline {pipeline_id}")
+            
+            # Uninstall and delete pipeline
+            try:
+                pipeline = dl.pipelines.get(pipeline_id=pipeline_id)
+                project = pipeline.project
+                
+                # Uninstall pipeline first
+                try:
+                    logger.info(f"Uninstalling pipeline {pipeline_id}...")
+                    pipeline.uninstall()
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'INFO',
+                        'message': f'Pipeline {pipeline_id} uninstalled successfully'
+                    })
+                except Exception as uninstall_error:
+                    logger.warning(f"Failed to uninstall pipeline {pipeline_id}: {uninstall_error}")
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'WARNING',
+                        'message': f'Failed to uninstall pipeline: {str(uninstall_error)}'
+                    })
+                
+                # Delete pipeline
+                try:
+                    logger.info(f"Deleting pipeline {pipeline_id}...")
+                    pipeline.delete()
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'INFO',
+                        'message': f'Pipeline {pipeline_id} deleted successfully'
+                    })
+                except Exception as delete_error:
+                    logger.error(f"Failed to delete pipeline {pipeline_id}: {delete_error}")
+                    progress['logs'].append({
+                        'timestamp': time.time(),
+                        'step': 'cancel',
+                        'level': 'ERROR',
+                        'message': f'Failed to delete pipeline: {str(delete_error)}'
+                    })
+                    raise
+            
+            except dl.exceptions.NotFound:
+                logger.warning(f"Pipeline {pipeline_id} not found - may have been already deleted")
+                progress['logs'].append({
+                    'timestamp': time.time(),
+                    'step': 'cancel',
+                    'level': 'INFO',
+                    'message': f'Pipeline {pipeline_id} not found (may have been already deleted)'
+                })
+            except Exception as e:
+                logger.error(f"Error cancelling pipeline {pipeline_id}: {e}", exc_info=True)
+                progress['logs'].append({
+                    'timestamp': time.time(),
+                    'step': 'cancel',
+                    'level': 'ERROR',
+                    'message': f'Error during cancellation: {str(e)}'
+                })
+            
+            # Mark workflow as cancelled
+            progress['status'] = 'cancelled'
+            progress['progress_pct'] = 0
+            progress['current_step'] = 'cancelled'
+            progress['logs'].append({
+                'timestamp': time.time(),
+                'step': 'cancel',
+                'level': 'INFO',
+                'message': 'Workflow cancelled successfully'
+            })
+            
+            self._send_json({
+                'success': True,
+                'message': 'Workflow cancelled successfully - pipeline uninstalled and deleted'
+            })
+            
+        except Exception as e:
+            logger.error(f"Cancel workflow error: {e}", exc_info=True)
             self._send_error(500, str(e))
     
     def _get_execution_logs(self, execution_id):
@@ -3004,6 +3157,12 @@ class ServiceRunner:
                 else:
                     logger.info(f"Pipeline created successfully: {pipeline_id}")
                     progress_callback('create_pipeline', 'completed', 80, f'Pipeline created: {pipeline_id}')
+                    # Store pipeline_id in workflow progress for cancellation
+                    if hasattr(self, '_current_workflow_id') and self._current_workflow_id:
+                        if self._current_workflow_id in workflow_progress:
+                            if workflow_progress[self._current_workflow_id].get('result') is None:
+                                workflow_progress[self._current_workflow_id]['result'] = {}
+                            workflow_progress[self._current_workflow_id]['result']['pipeline_id'] = pipeline_id
         else:
             logger.warning("=" * 60)
             logger.warning("STEP 3: Pipeline creation SKIPPED (skip_pipeline=True)")

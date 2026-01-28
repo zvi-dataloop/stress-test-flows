@@ -63,6 +63,7 @@
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
         .btn-success { background: var(--accent-success); color: white; }
         .btn-danger { background: var(--accent-danger); color: white; }
+        .btn-danger:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(239, 68, 68, 0.3); }
 
         /* Interactive Controls */
         .control-panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; margin-bottom: 24px; }
@@ -171,6 +172,9 @@
                 <button class="btn btn-run-all" id="runAllBtn" onclick="runFullWorkflow()">
                     🚀 Run Full Workflow
                 </button>
+                <button class="btn btn-danger" id="cancelBtn" onclick="cancelWorkflow()" style="display: none;" title="Cancel workflow and delete pipeline">
+                    ⛔ Cancel Workflow
+                </button>
                 <button class="btn btn-secondary" id="clearLogsBtn" onclick="clearLogs()">
                     🗑️ Clear Logs
                 </button>
@@ -249,6 +253,7 @@
         // localStorage keys
         const STORAGE_KEY_WORKFLOWS = 'stress_test_workflows';
         const STORAGE_KEY_CURRENT_WORKFLOW = 'stress_test_current_workflow';
+        const STORAGE_KEY_MAX_IMAGES = 'stress_test_max_images';
         
         // Save workflow progress to localStorage
         function saveWorkflowProgress(workflowId, progress) {
@@ -404,6 +409,68 @@
             const indicator = document.getElementById('statusIndicator');
             indicator.className = `status-indicator ${status}`;
             indicator.textContent = message || status.charAt(0).toUpperCase() + status.slice(1);
+            
+            // Show/hide cancel button based on status
+            const cancelBtn = document.getElementById('cancelBtn');
+            if (cancelBtn) {
+                if (status === 'running' || status === 'unknown') {
+                    cancelBtn.style.display = 'inline-flex';
+                } else {
+                    cancelBtn.style.display = 'none';
+                }
+            }
+        }
+        
+        async function cancelWorkflow() {
+            if (!currentWorkflowId) {
+                addLog('No active workflow to cancel', 'warning');
+                return;
+            }
+            
+            if (!confirm('Are you sure you want to cancel this workflow? This will uninstall and delete the pipeline.')) {
+                return;
+            }
+            
+            const cancelBtn = document.getElementById('cancelBtn');
+            if (cancelBtn) {
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = '⏳ Cancelling...';
+            }
+            
+            addLog('⛔ Cancelling workflow...', 'warning');
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/cancel-workflow/${currentWorkflowId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                
+                const result = await response.json();
+                
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+                
+                addLog(`✓ ${result.message || 'Workflow cancelled successfully'}`, 'success');
+                updateStatus('cancelled', 'Cancelled');
+                
+                // Stop polling
+                currentWorkflowId = null;
+                
+            } catch (error) {
+                addLog(`❌ Error cancelling workflow: ${error.message}`, 'error');
+                updateStatus('error', 'Cancel Failed');
+            } finally {
+                if (cancelBtn) {
+                    cancelBtn.disabled = false;
+                    cancelBtn.textContent = '⛔ Cancel Workflow';
+                }
+            }
         }
 
         function updateProgress(percent) {
@@ -439,6 +506,12 @@
             addLog('Starting full stress test workflow...', 'info');
             updateProgress(0);
             currentWorkflowId = null; // Reset current workflow
+            
+            // Show cancel button
+            const cancelBtn = document.getElementById('cancelBtn');
+            if (cancelBtn) {
+                cancelBtn.style.display = 'none'; // Will be shown when workflow starts
+            }
 
             const config = {
                 maxImages: parseInt(document.getElementById('maxImages').value),
@@ -481,6 +554,12 @@
                 updateStatus('running', 'Workflow Running');
                 updateProgress(5);
                 
+                // Show cancel button now that workflow is running
+                const cancelBtn = document.getElementById('cancelBtn');
+                if (cancelBtn) {
+                    cancelBtn.style.display = 'inline-flex';
+                }
+                
                 // Poll for workflow progress
                 await pollWorkflowProgress(result.workflow_id);
                 
@@ -492,6 +571,12 @@
                 isRunning = false;
                 runBtn.disabled = false;
                 runBtn.textContent = '🚀 Run Full Workflow';
+                
+                // Hide cancel button if workflow is not running
+                const cancelBtn = document.getElementById('cancelBtn');
+                if (cancelBtn && !currentWorkflowId) {
+                    cancelBtn.style.display = 'none';
+                }
             }
         }
 
@@ -565,6 +650,8 @@
                         updateStatus('success', 'Completed');
                     } else if (status === 'failed') {
                         updateStatus('error', 'Failed');
+                    } else if (status === 'cancelled' || status === 'cancelling') {
+                        updateStatus('error', status === 'cancelling' ? 'Cancelling...' : 'Cancelled');
                     } else {
                         updateStatus('running', `${currentStep} (${progressPct}%)`);
                     }
@@ -606,13 +693,15 @@
                         lastLogCount = logs.length;
                     }
                     
-                    // Check if workflow is complete
-                    if (status === 'completed') {
+                    // Check if workflow is complete or cancelled
+                    if (status === 'completed' || status === 'cancelled') {
                         // Clear batch progress line when workflow completes
                         clearBatchProgressLine();
                         // Save final state
                         saveWorkflowProgress(workflowId, progress);
-                        if (progress.result) {
+                        if (status === 'cancelled') {
+                            addLog('⛔ Workflow cancelled - pipeline uninstalled and deleted', 'warning');
+                        } else if (progress.result) {
                             addLog('🎉 Full workflow completed successfully!', 'success');
                             // Show summary
                             if (progress.result.steps) {
@@ -637,13 +726,17 @@
                             addLog('✓ Workflow completed', 'success');
                         }
                         break;
-                    } else if (status === 'failed') {
-                        // Clear batch progress line when workflow fails
+                    } else if (status === 'failed' || status === 'cancelled') {
+                        // Clear batch progress line when workflow fails or is cancelled
                         clearBatchProgressLine();
                         // Save final state
                         saveWorkflowProgress(workflowId, progress);
-                        const errorMsg = progress.error || 'Unknown error';
-                        addLog(`✗ Workflow failed: ${errorMsg}`, 'error');
+                        if (status === 'cancelled') {
+                            addLog('⛔ Workflow cancelled - pipeline uninstalled and deleted', 'warning');
+                        } else {
+                            const errorMsg = progress.error || 'Unknown error';
+                            addLog(`✗ Workflow failed: ${errorMsg}`, 'error');
+                        }
                         break;
                     }
                 } catch (error) {
@@ -659,8 +752,61 @@
             }
         }
 
+        // Save max images to localStorage
+        function saveMaxImages(value) {
+            try {
+                localStorage.setItem(STORAGE_KEY_MAX_IMAGES, value.toString());
+            } catch (e) {
+                console.error('Failed to save max images:', e);
+            }
+        }
+        
+        // Load max images from localStorage
+        function loadMaxImages() {
+            try {
+                const saved = localStorage.getItem(STORAGE_KEY_MAX_IMAGES);
+                if (saved) {
+                    const value = parseInt(saved, 10);
+                    if (!isNaN(value) && value >= 1 && value <= 123287) {
+                        return value;
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to load max images:', e);
+            }
+            return 50000; // Default value
+        }
+        
         // Check backend server status on load
         window.addEventListener('load', async () => {
+            // Restore max images from localStorage
+            try {
+                const savedMaxImages = loadMaxImages();
+                const maxImagesInput = document.getElementById('maxImages');
+                if (maxImagesInput && savedMaxImages !== 50000) {
+                    maxImagesInput.value = savedMaxImages;
+                }
+            } catch (e) {
+                console.error('Failed to restore max images:', e);
+            }
+            
+            // Add event listener to save max images when changed
+            const maxImagesInput = document.getElementById('maxImages');
+            if (maxImagesInput) {
+                maxImagesInput.addEventListener('change', function() {
+                    const value = parseInt(this.value, 10);
+                    if (!isNaN(value) && value >= 1 && value <= 123287) {
+                        saveMaxImages(value);
+                    }
+                });
+                maxImagesInput.addEventListener('blur', function() {
+                    const value = parseInt(this.value, 10);
+                    if (!isNaN(value) && value >= 1 && value <= 123287) {
+                        saveMaxImages(value);
+                    }
+                });
+            }
+            
             // Check server connection
             try {
                 const response = await fetch(`${API_BASE_URL}/api/health`);
