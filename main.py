@@ -2088,19 +2088,30 @@ class StressTestServer(dl.BaseServiceRunner):
         # Step 4: Create new pipeline with 2 nodes: code node (stream-image) -> ResNet
         logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
         
-        # Check if stream-image package already exists
-        stream_image_package_exists = False
-        stream_image_package_id = None
+        # Check if stream-image package already exists and rename it if needed
         try:
-            packages = project.packages.list()
-            for pkg in packages:
-                if pkg.name == 'stream-image':
-                    stream_image_package_exists = True
-                    stream_image_package_id = pkg.id
-                    logger.info(f"Found existing stream-image package: {pkg.id}")
-                    break
+            existing_package = project.packages.get(package_name='stream-image')
+            if existing_package:
+                logger.info(f"Found existing stream-image package: {existing_package.id}")
+                # Generate unique package name
+                import time as time_module
+                unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
+                new_package_name = f"stream-image-{unique_suffix}"
+                logger.info(f"Renaming existing package from 'stream-image' to '{new_package_name}' to avoid conflict")
+                
+                # Rename the package
+                try:
+                    existing_package.name = new_package_name
+                    existing_package.update()
+                    logger.info(f"Successfully renamed package to: {new_package_name}")
+                except Exception as rename_error:
+                    logger.warning(f"Could not rename package: {rename_error}")
+                    # Try alternative method - delete and recreate might be needed
+                    logger.warning("Package rename failed, but will proceed - pipeline creation may fail")
+        except dl.exceptions.NotFound:
+            logger.info("No existing stream-image package found - will create new one")
         except Exception as e:
-            logger.warning(f"Could not check for existing packages: {e}")
+            logger.warning(f"Could not check for existing stream-image package: {e}")
         
         # Create pipeline
         pipeline = project.pipelines.create(name=pipeline_name)
@@ -2117,42 +2128,7 @@ class StressTestServer(dl.BaseServiceRunner):
             
             # Code node for streaming/downloading image
             # Root node receives items from batch execution
-            # If package already exists, don't include package config (will use existing package)
-            code_node_config = {}
-            if not stream_image_package_exists:
-                # Package doesn't exist - include package config to create it
-                code_node_config = {
-                    "package": {
-                        "code": '''import dtlpy as dl
-import io
-import requests
-from PIL import Image
-
-class ServiceRunner:
-
-    def stream_image(self, item):
-        headers = {
-            "Authorization": f"Bearer {dl.token()}"
-        }
-        response = requests.get(item.stream, headers=headers, timeout=30)
-        response.raise_for_status()
-        
-        image_data = io.BytesIO(response.content)
-        
-        with Image.open(image_data) as img:
-            img.verify()
-            print(f"Success: Valid {img.format} image downloaded.")
-        return item
-''',
-                        "name": "run",
-                        "type": "code",
-                        "codebase": {"type": "Item"}
-                    }
-                }
-                logger.info("Package doesn't exist - will create new stream-image package")
-            else:
-                logger.info(f"Package already exists ({stream_image_package_id}) - will use existing package")
-            
+            # Package config is always included (existing package was renamed if it existed)
             code_node = {
                 "id": code_node_id,
                 "inputs": [
@@ -2187,12 +2163,36 @@ class ServiceRunner:
                     "moduleName": "code_module",
                     "packageName": "stream-image"
                 },
-                "projectId": project.id
+                "projectId": project.id,
+                "config": {
+                    "package": {
+                        "code": '''import dtlpy as dl
+import io
+import requests
+from PIL import Image
+
+class ServiceRunner:
+
+    def stream_image(self, item):
+        headers = {
+            "Authorization": f"Bearer {dl.token()}"
+        }
+        response = requests.get(item.stream, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        image_data = io.BytesIO(response.content)
+        
+        with Image.open(image_data) as img:
+            img.verify()
+            print(f"Success: Valid {img.format} image downloaded.")
+        return item
+''',
+                        "name": "run",
+                        "type": "code",
+                        "codebase": {"type": "Item"}
+                    }
+                }
             }
-            
-            # Only add package config if package doesn't exist
-            if code_node_config:
-                code_node["config"] = code_node_config
             
             # ResNet model node
             resnet_node = {
@@ -2389,23 +2389,96 @@ class ServiceRunner:
                 try:
                     pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                     current_nodes = pipeline.nodes
+                    
+                    # Handle case where nodes might be a single object or a list
+                    if not isinstance(current_nodes, list):
+                        if current_nodes is None:
+                            current_nodes = []
+                        else:
+                            # Convert single node to list
+                            current_nodes = [current_nodes]
+                    
                     logger.info(f"Found {len(current_nodes)} nodes in pipeline")
                     
                     # Find and update the code node
                     updated_nodes = []
                     node_updated = False
+                    
+                    # Ensure current_nodes is iterable (list)
+                    if not isinstance(current_nodes, (list, tuple)):
+                        # If it's a single node object, convert to list
+                        current_nodes = [current_nodes]
+                    
                     for i, node in enumerate(current_nodes):
-                        # Convert node to dict if it's an object
+                        # Convert node to dict if it's an object (like CodeNode)
+                        original_node = node
                         if not isinstance(node, dict):
                             try:
-                                node = node.to_dict() if hasattr(node, 'to_dict') else dict(node)
-                            except:
-                                node = dict(node) if hasattr(node, '__dict__') else node
+                                # Try to_dict() method first
+                                if hasattr(node, 'to_dict'):
+                                    node = node.to_dict()
+                                # Try accessing attributes directly (for CodeNode objects)
+                                elif hasattr(node, 'type') or hasattr(node, 'namespace'):
+                                    # It's a node object, convert to dict manually
+                                    node_dict = {}
+                                    if hasattr(node, 'type'):
+                                        node_dict['type'] = node.type
+                                    if hasattr(node, 'name'):
+                                        node_dict['name'] = node.name
+                                    if hasattr(node, 'namespace'):
+                                        namespace = node.namespace
+                                        if hasattr(namespace, 'packageName'):
+                                            node_dict['namespace'] = {'packageName': namespace.packageName}
+                                            if hasattr(namespace, 'serviceName'):
+                                                node_dict['namespace']['serviceName'] = namespace.serviceName
+                                        elif isinstance(namespace, dict):
+                                            node_dict['namespace'] = namespace
+                                        else:
+                                            node_dict['namespace'] = {}
+                                    if hasattr(node, 'metadata'):
+                                        metadata = node.metadata
+                                        if isinstance(metadata, dict):
+                                            node_dict['metadata'] = metadata
+                                        elif hasattr(metadata, 'codeApplicationName'):
+                                            node_dict['metadata'] = {'codeApplicationName': metadata.codeApplicationName}
+                                        else:
+                                            node_dict['metadata'] = {}
+                                    # Copy other important attributes
+                                    for attr in ['id', 'inputs', 'outputs', 'config', 'projectId']:
+                                        if hasattr(node, attr):
+                                            node_dict[attr] = getattr(node, attr)
+                                    node = node_dict
+                                # Try converting via __dict__
+                                elif hasattr(node, '__dict__'):
+                                    node = dict(node.__dict__)
+                                else:
+                                    # Last resort: try to convert
+                                    node = dict(node)
+                            except Exception as conv_error:
+                                logger.warning(f"Could not convert node {i} to dict: {conv_error}, trying to access as object")
+                                # If conversion fails, we'll handle it below
+                                pass
                         
-                        node_type = node.get('type', '')
-                        node_name = node.get('name', '')
-                        node_namespace = node.get('namespace', {})
-                        package_name = node_namespace.get('packageName', '') if isinstance(node_namespace, dict) else ''
+                        # Extract node properties (handle both dict and object)
+                        if isinstance(node, dict):
+                            node_type = node.get('type', '')
+                            node_name = node.get('name', '')
+                            node_namespace = node.get('namespace', {})
+                            package_name = node_namespace.get('packageName', '') if isinstance(node_namespace, dict) else ''
+                        else:
+                            # Access as object attributes (fallback)
+                            node_type = getattr(node, 'type', '')
+                            node_name = getattr(node, 'name', '')
+                            namespace_obj = getattr(node, 'namespace', None)
+                            if namespace_obj:
+                                if hasattr(namespace_obj, 'packageName'):
+                                    package_name = namespace_obj.packageName
+                                elif isinstance(namespace_obj, dict):
+                                    package_name = namespace_obj.get('packageName', '')
+                                else:
+                                    package_name = ''
+                            else:
+                                package_name = ''
                         
                         logger.info(f"Node {i}: type={node_type}, name={node_name}, packageName={package_name}")
                         
