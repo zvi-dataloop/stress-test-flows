@@ -7,6 +7,11 @@
     "Provider": "Other",
     "Category": "Application"
   },
+  "codebase": {
+    "type": "git",
+    "gitUrl": "https://github.com/zvi-dataloop/nginx-stress-tests.git",
+    "gitTag": "1.0.1"
+  },
   "description": "Stress test benchmark app with API to create datasets, pipelines, and execute batch tests",
   "components": {
     "panels": [
