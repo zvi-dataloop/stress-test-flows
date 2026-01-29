@@ -175,6 +175,16 @@
                     <label>Num Workers</label>
                     <input type="number" id="numWorkers" value="50" min="1" max="100">
                 </div>
+                <div class="form-group">
+                    <label>Pipeline Concurrency</label>
+                    <input type="number" id="pipelineConcurrency" value="8" min="1" max="20">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Concurrent executions per pod</small>
+                </div>
+                <div class="form-group">
+                    <label>Pipeline Max Replicas</label>
+                    <input type="number" id="pipelineMaxReplicas" value="12" min="1" max="50">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Maximum number of pods</small>
+                </div>
             </div>
 
             <div class="action-buttons">
@@ -648,7 +658,9 @@
                 linkBaseUrl: document.getElementById('linkBaseUrl').value,
                 pipelineName: document.getElementById('pipelineName').value,
                 // Project ID is optional - will be auto-detected from service
-                numWorkers: parseInt(document.getElementById('numWorkers').value)
+                numWorkers: parseInt(document.getElementById('numWorkers').value),
+                pipelineConcurrency: parseInt(document.getElementById('pipelineConcurrency').value),
+                pipelineMaxReplicas: parseInt(document.getElementById('pipelineMaxReplicas').value)
             };
 
             try {

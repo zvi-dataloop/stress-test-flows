@@ -543,6 +543,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "driverId": "...",  # or "driver_id" (optional, default: "rubiks_internal_faas_proxy_driver")
             "pipelineName": "...",  # or "pipeline_name" (optional)
             "numWorkers": 50,  # or "num_workers"
+            "pipelineConcurrency": 8,  # or "pipeline_concurrency" - concurrent executions per pod (default: 8)
+            "pipelineMaxReplicas": 12,  # or "pipeline_max_replicas" - maximum number of pods (default: 12)
             "cocoDataset": "all",  # or "coco_dataset" - "train2017", "val2017", or "all"
             "createDataset": false,  # or "create_dataset" - Create dataset if it doesn't exist
             "skipDownload": false,  # or "skip_download"
@@ -568,6 +570,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             driver_id = data.get('driverId') or data.get('driver_id') or 'rubiks_internal_faas_proxy_driver'
             pipeline_name = data.get('pipelineName') or data.get('pipeline_name', 'stress-test-resnet-v11')
             num_workers = data.get('numWorkers') or data.get('num_workers', 50)
+            pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 8)
+            pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
             # If dataset_id is empty, automatically create dataset (treat as create_dataset=true)
             create_dataset_param = data.get('createDataset') or data.get('create_dataset', False)
@@ -712,6 +716,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 driver_id=driver_id,
                 pipeline_name=pipeline_name,
                 num_workers=num_workers,
+                pipeline_concurrency=pipeline_concurrency,
+                pipeline_max_replicas=pipeline_max_replicas,
                 coco_dataset=coco_dataset,
                 create_dataset=create_dataset,
                 skip_download=skip_download,
@@ -1768,7 +1774,7 @@ class StressTestServer(dl.BaseServiceRunner):
             'sample_items': created[:5] if created else []
         }
     
-    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None) -> dict:
+    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None, pipeline_concurrency: int = 8, pipeline_max_replicas: int = 12) -> dict:
         """
         Create stress test pipeline with ResNet model node.
         Installs the ResNet DPK if not already installed.
@@ -1898,11 +1904,11 @@ class StressTestServer(dl.BaseServiceRunner):
                             
                             # Merge runtime config with existing runtime if it exists
                             new_runtime = {
-                                'concurrency': 5,
+                                'concurrency': 30,
                                 'autoscaler': {
                                     'type': 'rabbitmq',
                                     'minReplicas': 1,
-                                    'maxReplicas': 8
+                                    'maxReplicas': 12
                                 }
                             }
                             if 'runtime' in compute_config and isinstance(compute_config['runtime'], dict):
@@ -2166,11 +2172,11 @@ class StressTestServer(dl.BaseServiceRunner):
                 "metadata": {
                     "serviceConfig": {
                         "runtime": {
-                            "concurrency": 8,
+                            "concurrency": pipeline_concurrency,
                             "autoscaler": {
                                 "type": "rabbitmq",
                                 "minReplicas": 1,
-                                "maxReplicas": 8,
+                                "maxReplicas": pipeline_max_replicas,
                                 "queueLength": 10
                             }
                         }
@@ -3406,6 +3412,8 @@ class ServiceRunner:
                              driver_id: str = None,
                              pipeline_name: str = None,
                              num_workers: int = 50,
+                             pipeline_concurrency: int = 8,
+                             pipeline_max_replicas: int = 12,
                              coco_dataset: str = 'all',
                              create_dataset: bool = False,
                              skip_download: bool = False,
@@ -3740,7 +3748,12 @@ class ServiceRunner:
             logger.info("STEP 3: Creating pipeline")
             logger.info("=" * 60)
             
-            pipeline_result = self.create_pipeline(pipeline_name=pipeline_name, project_id=project_id)
+            pipeline_result = self.create_pipeline(
+                pipeline_name=pipeline_name, 
+                project_id=project_id,
+                pipeline_concurrency=pipeline_concurrency,
+                pipeline_max_replicas=pipeline_max_replicas
+            )
             logger.info(f"create_pipeline returned: {pipeline_result}")
             results['steps'].append({
                 'step': 'create_pipeline',
