@@ -102,6 +102,17 @@
                 <p>• See Dataloop documentation: <a href="https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter" target="_blank">GCS Integration Guide</a></p>
                 <p>• <a href="https://docs.dataloop.ai/docs/cross-project-integration" target="_blank">Cross-Project Integration</a> (recommended) or <a href="https://docs.dataloop.ai/docs/private-key-integration" target="_blank">Private Key Integration</a></p>
             </div>
+            <div class="info-box" style="margin-top: 16px; background: rgba(16, 185, 129, 0.08); border-color: var(--accent-success);">
+                <p><strong>💡 Alternative: Use Scripts Locally</strong></p>
+                <p>You can also use the Python scripts locally on your machine:</p>
+                <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--bg-tertiary); padding: 8px; border-radius: 4px; margin-top: 8px;">
+                    # Check existing drivers<br>
+                    python check_faas_proxy_drivers.py --project-name "your-project"<br><br>
+                    # Create a new driver<br>
+                    python create_faas_proxy_driver.py
+                </p>
+                <p style="margin-top: 8px;">The scripts are available in the project root directory.</p>
+            </div>
         </div>
 
         <div class="card">
@@ -119,8 +130,28 @@
                 Create a new faasProxy storage driver. You can use an existing GCS integration or create a new one.
             </p>
             
-            <button class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
-            <div id="integrationsList" style="margin-bottom: 20px;"></div>
+            <div style="margin-bottom: 20px;">
+                <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer;">
+                    <input type="radio" name="integrationMode" value="select" checked onchange="toggleIntegrationMode()" style="width: auto;">
+                    <span>Select from list (if available)</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
+                    <input type="radio" name="integrationMode" value="manual" onchange="toggleIntegrationMode()" style="width: auto;">
+                    <span>Enter Integration ID manually</span>
+                </label>
+            </div>
+
+            <div id="integrationSelectMode" style="margin-bottom: 20px;">
+                <button class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
+                <div id="integrationsList" style="margin-bottom: 20px;"></div>
+            </div>
+
+            <div id="integrationManualMode" style="display: none; margin-bottom: 20px;">
+                <div class="info-box">
+                    <p><strong>Note:</strong> FaaS services don't have access to read organization-level integrations.</p>
+                    <p>If you know your GCS integration ID, enter it manually below.</p>
+                </div>
+            </div>
 
             <div id="statusMessage"></div>
 
@@ -130,12 +161,18 @@
                     <input type="text" id="driverName" required placeholder="e.g., faas-proxy-driver">
                 </div>
 
-                <div class="form-group">
+                <div class="form-group" id="integrationSelectGroup">
                     <label for="integrationId">GCS Integration *</label>
-                    <select id="integrationId" required>
+                    <select id="integrationId">
                         <option value="">Select an integration...</option>
                     </select>
                     <small>Select an existing GCS integration from the list above</small>
+                </div>
+
+                <div class="form-group" id="integrationManualGroup" style="display: none;">
+                    <label for="integrationIdManual">GCS Integration ID *</label>
+                    <input type="text" id="integrationIdManual" placeholder="e.g., ed2536b0-78de-4eb0-b79b-dc0cb864823b">
+                    <small>Enter your GCS integration ID (you can find it in the Dataloop platform or by running the script locally)</small>
                 </div>
 
                 <div class="form-group">
@@ -246,6 +283,32 @@
             }
         }
 
+        function toggleIntegrationMode() {
+            const mode = document.querySelector('input[name="integrationMode"]:checked').value;
+            const selectMode = document.getElementById('integrationSelectMode');
+            const manualMode = document.getElementById('integrationManualMode');
+            const selectGroup = document.getElementById('integrationSelectGroup');
+            const manualGroup = document.getElementById('integrationManualGroup');
+            const selectField = document.getElementById('integrationId');
+            const manualField = document.getElementById('integrationIdManual');
+            
+            if (mode === 'manual') {
+                selectMode.style.display = 'none';
+                manualMode.style.display = 'block';
+                selectGroup.style.display = 'none';
+                manualGroup.style.display = 'block';
+                selectField.removeAttribute('required');
+                manualField.setAttribute('required', 'required');
+            } else {
+                selectMode.style.display = 'block';
+                manualMode.style.display = 'none';
+                selectGroup.style.display = 'block';
+                manualGroup.style.display = 'none';
+                manualField.removeAttribute('required');
+                selectField.setAttribute('required', 'required');
+            }
+        }
+
         function copyDriverId(driverId) {
             navigator.clipboard.writeText(driverId).then(() => {
                 alert(`Driver ID copied to clipboard: ${driverId}`);
@@ -264,9 +327,22 @@
             statusDiv.innerHTML = '';
             resultDiv.innerHTML = '';
             
+            // Get integration ID based on selected mode
+            const mode = document.querySelector('input[name="integrationMode"]:checked').value;
+            const integrationId = mode === 'manual' 
+                ? document.getElementById('integrationIdManual').value.trim()
+                : document.getElementById('integrationId').value;
+            
+            if (!integrationId) {
+                statusDiv.innerHTML = '<div class="status-message error">✗ Please provide a GCS Integration ID</div>';
+                createBtn.disabled = false;
+                createBtn.innerHTML = '🚀 Create faasProxy Driver';
+                return;
+            }
+            
             const formData = {
                 driverName: document.getElementById('driverName').value,
-                integrationId: document.getElementById('integrationId').value,
+                integrationId: integrationId,
                 bucketName: document.getElementById('bucketName').value,
                 path: document.getElementById('path').value || null,
                 allowExternalDelete: document.getElementById('allowExternalDelete').checked

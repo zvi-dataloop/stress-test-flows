@@ -53,7 +53,21 @@ The faasProxy storage driver is required for the stress test workflow. It's buil
 
 ### Check Existing Drivers
 
-Before creating a new driver, check if one already exists (project name or ID is required):
+### Using the Web UI
+
+You can create and manage faasProxy drivers through the web interface in Step 2 of the application. The UI allows you to:
+- List existing drivers
+- Create new drivers
+- Enter integration IDs manually (useful when FaaS doesn't have access to read org-level integrations)
+
+### Using Scripts Locally
+
+The scripts are available in the project root for local use. This is especially useful when:
+- You need to check integrations (FaaS services don't have access to read org-level integrations)
+- You prefer command-line workflows
+- You want to automate driver creation
+
+**Check existing drivers** (project name or ID is required):
 
 ```bash
 # Simple check script
@@ -65,9 +79,7 @@ python create_faas_proxy_driver.py --check --project-name "your-project"
 python create_faas_proxy_driver.py --check --project-id "your-project-id"
 ```
 
-### Quick Setup
-
-Use the provided script to create the faasProxy driver:
+**Create a new driver:**
 
 ```bash
 python create_faas_proxy_driver.py
