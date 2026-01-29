@@ -102,7 +102,7 @@ def list_gcs_integrations(organization: dl.Organization) -> list:
                 integration_name = getattr(integration, 'name', 'Unknown')
                 integration_id = getattr(integration, 'id', 'Unknown')
             
-            # Check if it matches GCS type (could be string 'gcs' or enum)
+            # Check if it matches GCS type (could be string 'gcs', 'gcp-workload-identity-federation', or enum)
             is_gcs = False
             print(f"    Integration type: {integration}")
             if integration_type:
@@ -115,13 +115,16 @@ def list_gcs_integrations(organization: dl.Organization) -> list:
                 # Check if it's exactly 'gcs' (most common case)
                 elif type_str == 'gcs':
                     is_gcs = True
+                # Check for gcp-workload-identity-federation
+                elif type_str == 'gcp-workload-identity-federation':
+                    is_gcs = True
                 # Check for variations
-                elif 'gcs' in type_str or 'google' in type_str or 'cloudstorage' in type_str.replace(' ', ''):
+                elif 'gcs' in type_str or 'google' in type_str or 'cloudstorage' in type_str.replace(' ', '') or 'workload-identity' in type_str:
                     is_gcs = True
             else:
                 # Fallback: check if name contains GCS-related keywords
                 name_lower = integration_name.lower()
-                if 'gcs' in name_lower or 'google' in name_lower or 'cloud storage' in name_lower:
+                if 'gcs' in name_lower or 'google' in name_lower or 'cloud storage' in name_lower or 'workload-identity' in name_lower:
                     print(f"    Found potential GCS integration by name: {integration_name} (type attribute not found)")
                     is_gcs = True
             

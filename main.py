@@ -1559,7 +1559,14 @@ class StressTestServer(dl.BaseServiceRunner):
         try:
             if organization_id is None:
                 project = dl.projects.get(project_id=self.project_id)
-                organization = project.org
+                # Handle both dict and SDK object for project.org
+                if isinstance(project.org, dict):
+                    org_id = project.org.get('id')
+                    if not org_id:
+                        raise ValueError("Could not get organization ID from project")
+                    organization = dl.organizations.get(organization_id=org_id)
+                else:
+                    organization = project.org
             else:
                 organization = dl.organizations.get(organization_id=organization_id)
             
@@ -1586,18 +1593,19 @@ class StressTestServer(dl.BaseServiceRunner):
                     integration_name = getattr(integration, 'name', 'Unknown')
                     integration_id = getattr(integration, 'id', 'Unknown')
                 
-                # Check if it matches GCS type
+                # Check if it matches GCS type (including gcp-workload-identity-federation)
                 is_gcs = False
                 if integration_type:
                     type_str = str(integration_type).lower().strip()
                     if (integration_type == dl.ExternalStorage.GCS or 
                         type_str == 'gcs' or
-                        'gcs' in type_str or 'google' in type_str):
+                        type_str == 'gcp-workload-identity-federation' or
+                        'gcs' in type_str or 'google' in type_str or 'workload-identity' in type_str):
                         is_gcs = True
                 else:
                     # Fallback: check name
                     name_lower = integration_name.lower()
-                    if 'gcs' in name_lower or 'google' in name_lower:
+                    if 'gcs' in name_lower or 'google' in name_lower or 'workload-identity' in name_lower:
                         is_gcs = True
                 
                 if is_gcs:
@@ -1687,8 +1695,18 @@ class StressTestServer(dl.BaseServiceRunner):
                 project_id = self.project_id
             project = dl.projects.get(project_id=project_id)
             
-            # Get integration
-            organization = project.org
+            # Get integration - handle both dict and SDK object for project.org
+            if isinstance(project.org, dict):
+                org_id = project.org.get('id')
+                if not org_id:
+                    return {
+                        'success': False,
+                        'error': 'Could not get organization ID from project'
+                    }
+                organization = dl.organizations.get(organization_id=org_id)
+            else:
+                organization = project.org
+            
             all_integrations = organization.integrations.list()
             integration = None
             
@@ -1739,8 +1757,17 @@ class StressTestServer(dl.BaseServiceRunner):
             else:
                 integration_type_str = str(integration_type).lower()
             
-            # Get organization ID
-            org_id = organization.id
+            # Get organization ID - handle both dict and SDK object
+            if isinstance(organization, dict):
+                org_id = organization.get('id')
+            else:
+                org_id = organization.id
+            
+            if not org_id:
+                return {
+                    'success': False,
+                    'error': 'Could not determine organization ID'
+                }
             
             # Build payload
             payload = {

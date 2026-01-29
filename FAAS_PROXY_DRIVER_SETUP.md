@@ -48,11 +48,17 @@ The script will:
 
 **Before running the script, prepare:**
 
+**Supported GCS Integration Types:**
+- `gcs` - Standard GCS integration
+- `gcp-workload-identity-federation` - Workload Identity Federation integration
+
 1. **GCS Integration**: You can use an existing GCS integration or create a new one
    - The script will list existing GCS integrations and let you select one
+   - Supported integration types: `gcs`, `gcp-workload-identity-federation`
    - To create a new one, see Dataloop documentation: [GCS Integration Guide](https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter)
    - For Cross-Project Integration (recommended): [Cross-Project Integration](https://docs.dataloop.ai/docs/cross-project-integration)
    - For Private Key Integration: [Private Key Integration](https://docs.dataloop.ai/docs/private-key-integration)
+   - For Workload Identity Federation: [Workload Identity Federation](https://docs.dataloop.ai/docs/workload-identity-federation)
 
 2. **Dataloop Access**:
    - Organization name
@@ -86,11 +92,16 @@ python create_faas_proxy_driver.py
 
 ### Step 1: Create GCS Integration
 
-First, create a GCS integration in your Dataloop organization. See the Dataloop documentation for detailed instructions:
+First, create a GCS integration in your Dataloop organization. Supported integration types:
+- `gcs` - Standard GCS integration
+- `gcp-workload-identity-federation` - Workload Identity Federation integration
+
+See the Dataloop documentation for detailed instructions:
 
 - **GCS Integration Guide**: https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter
 - **Cross-Project Integration** (recommended for GCP): https://docs.dataloop.ai/docs/cross-project-integration
 - **Private Key Integration**: https://docs.dataloop.ai/docs/private-key-integration
+- **Workload Identity Federation**: https://docs.dataloop.ai/docs/workload-identity-federation
 
 ### Step 2: Create faasProxy Driver
 
@@ -265,6 +276,7 @@ Content-Type: application/json
 - [GCS Integration Guide](https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter)
 - [Cross-Project Integration](https://docs.dataloop.ai/docs/cross-project-integration)
 - [Private Key Integration](https://docs.dataloop.ai/docs/private-key-integration)
+- [Workload Identity Federation](https://docs.dataloop.ai/docs/workload-identity-federation)
 
 ## Configuration File
 
