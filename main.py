@@ -185,6 +185,10 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         elif path.startswith('/api/workflow-progress/'):
             workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
             self._get_workflow_progress(workflow_id)
+        elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
+            self._list_gcs_integrations()
+        elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
+            self._list_faas_proxy_drivers()
         else:
             # Handle static file paths
             # Ensure root path serves index.html
@@ -306,6 +310,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._execute_service_function(data)
         elif parsed.path == '/api/run-full':
             self._run_full_workflow(data)
+        elif parsed.path == '/api/create-faas-proxy-driver':
+            self._create_faas_proxy_driver(data)
         elif parsed.path.startswith('/api/cancel-workflow/'):
             workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
             self._cancel_workflow(workflow_id)
@@ -373,6 +379,55 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             })
         except Exception as e:
             self._send_error(500, str(e))
+    
+    def _list_gcs_integrations(self):
+        """List all GCS integrations in the organization"""
+        try:
+            project = self._get_project()
+            result = _stress_test_server_instance.list_gcs_integrations()
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error listing GCS integrations: {e}", exc_info=True)
+            self._send_json({'success': False, 'error': str(e), 'integrations': []})
+    
+    def _list_faas_proxy_drivers(self):
+        """List all faasProxy drivers for the project"""
+        try:
+            project = self._get_project()
+            result = _stress_test_server_instance.list_faas_proxy_drivers(project_id=project.id)
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error listing faasProxy drivers: {e}", exc_info=True)
+            self._send_json({'success': False, 'error': str(e), 'drivers': []})
+    
+    def _create_faas_proxy_driver(self, data):
+        """Create a faasProxy storage driver"""
+        try:
+            project = self._get_project()
+            project_id = project.id
+            
+            driver_name = data.get('driverName') or data.get('driver_name')
+            integration_id = data.get('integrationId') or data.get('integration_id')
+            bucket_name = data.get('bucketName') or data.get('bucket_name')
+            path = data.get('path')
+            allow_external_delete = data.get('allowExternalDelete', data.get('allow_external_delete', True))
+            
+            if not driver_name or not integration_id or not bucket_name:
+                self._send_error(400, 'driverName, integrationId, and bucketName are required')
+                return
+            
+            result = _stress_test_server_instance.create_faas_proxy_driver(
+                project_id=project_id,
+                driver_name=driver_name,
+                integration_id=integration_id,
+                bucket_name=bucket_name,
+                path=path,
+                allow_external_delete=allow_external_delete
+            )
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
+            self._send_json({'success': False, 'error': str(e)})
     
     def _get_stress_test_service(self, project_id=None):
         """Get the stress-test-service and its project"""
@@ -543,7 +598,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "driverId": "...",  # or "driver_id" (optional, default: "rubiks_internal_faas_proxy_driver")
             "pipelineName": "...",  # or "pipeline_name" (optional)
             "numWorkers": 50,  # or "num_workers"
-            "pipelineConcurrency": 8,  # or "pipeline_concurrency" - concurrent executions per pod (default: 8)
+            "pipelineConcurrency": 30,  # or "pipeline_concurrency" - concurrent executions per pod (default: 30)
             "pipelineMaxReplicas": 12,  # or "pipeline_max_replicas" - maximum number of pods (default: 12)
             "cocoDataset": "all",  # or "coco_dataset" - "train2017", "val2017", or "all"
             "createDataset": false,  # or "create_dataset" - Create dataset if it doesn't exist
@@ -570,7 +625,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             driver_id = data.get('driverId') or data.get('driver_id') or 'rubiks_internal_faas_proxy_driver'
             pipeline_name = data.get('pipelineName') or data.get('pipeline_name', 'stress-test-resnet-v11')
             num_workers = data.get('numWorkers') or data.get('num_workers', 50)
-            pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 8)
+            pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 30)
             pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
             # If dataset_id is empty, automatically create dataset (treat as create_dataset=true)
@@ -618,7 +673,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 skip_link_items,
                 skip_pipeline,
                 skip_execute,
-                link_base_url
+                link_base_url,
+                pipeline_concurrency,
+                pipeline_max_replicas
             ), daemon=True).start()
             
             # Return immediately with workflow_id for polling
@@ -652,7 +709,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
     def _run_workflow_async(self, workflow_id, max_images, dataset_id_param, project_id_param,
                            dataset_name, driver_id, pipeline_name, num_workers, coco_dataset,
                            create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
-                           link_base_url):
+                           link_base_url, pipeline_concurrency, pipeline_max_replicas):
         """Run workflow in background thread with progress updates"""
         try:
             def update_progress(step, status, progress_pct, message, result=None, error=None):
@@ -1489,6 +1546,274 @@ class StressTestServer(dl.BaseServiceRunner):
                 'driver_id': driver_id
             }
     
+    def list_gcs_integrations(self, organization_id: str = None) -> dict:
+        """
+        List all GCS integrations in the organization.
+        
+        Args:
+            organization_id: Organization ID (if None, uses project's organization)
+        
+        Returns:
+            dict with list of GCS integrations
+        """
+        try:
+            if organization_id is None:
+                project = dl.projects.get(project_id=self.project_id)
+                organization = project.org
+            else:
+                organization = dl.organizations.get(organization_id=organization_id)
+            
+            gcs_integrations = []
+            all_integrations = organization.integrations.list()
+            
+            for integration in all_integrations:
+                # Check if it's a GCS integration
+                integration_type = None
+                if hasattr(integration, 'type'):
+                    integration_type = integration.type
+                elif hasattr(integration, 'integrations_type'):
+                    integration_type = integration.integrations_type
+                elif isinstance(integration, dict):
+                    integration_type = integration.get('type')
+                else:
+                    integration_type = getattr(integration, 'type', None)
+                
+                # Get name and ID
+                if isinstance(integration, dict):
+                    integration_name = integration.get('name', 'Unknown')
+                    integration_id = integration.get('id', 'Unknown')
+                else:
+                    integration_name = getattr(integration, 'name', 'Unknown')
+                    integration_id = getattr(integration, 'id', 'Unknown')
+                
+                # Check if it matches GCS type
+                is_gcs = False
+                if integration_type:
+                    type_str = str(integration_type).lower().strip()
+                    if (integration_type == dl.ExternalStorage.GCS or 
+                        type_str == 'gcs' or
+                        'gcs' in type_str or 'google' in type_str):
+                        is_gcs = True
+                else:
+                    # Fallback: check name
+                    name_lower = integration_name.lower()
+                    if 'gcs' in name_lower or 'google' in name_lower:
+                        is_gcs = True
+                
+                if is_gcs:
+                    gcs_integrations.append({
+                        'id': integration_id,
+                        'name': integration_name,
+                        'type': str(integration_type) if integration_type else 'gcs'
+                    })
+            
+            return {
+                'success': True,
+                'integrations': gcs_integrations,
+                'count': len(gcs_integrations)
+            }
+        except Exception as e:
+            logger.error(f"Error listing GCS integrations: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'integrations': []
+            }
+    
+    def list_faas_proxy_drivers(self, project_id: str = None) -> dict:
+        """
+        List all faasProxy drivers for a project.
+        
+        Args:
+            project_id: Project ID (if None, uses self.project_id)
+        
+        Returns:
+            dict with list of faasProxy drivers
+        """
+        try:
+            if project_id is None:
+                project_id = self.project_id
+            project = dl.projects.get(project_id=project_id)
+            
+            faas_proxy_drivers = []
+            all_drivers = project.drivers.list()
+            
+            for driver in all_drivers:
+                driver_type = getattr(driver, 'type', None) or getattr(driver, 'driverType', None)
+                if driver_type == 'faasProxy':
+                    driver_info = {
+                        'id': driver.id,
+                        'name': driver.name,
+                        'type': driver_type,
+                        'bucket': getattr(driver, 'bucket', None),
+                        'path': getattr(driver, 'path', None),
+                        'allow_external_delete': getattr(driver, 'allow_external_delete', None),
+                        'integration_id': getattr(driver, 'integration_id', None)
+                    }
+                    faas_proxy_drivers.append(driver_info)
+            
+            return {
+                'success': True,
+                'drivers': faas_proxy_drivers,
+                'count': len(faas_proxy_drivers)
+            }
+        except Exception as e:
+            logger.error(f"Error listing faasProxy drivers: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'drivers': []
+            }
+    
+    def create_faas_proxy_driver(self, project_id: str = None, driver_name: str = None,
+                                 integration_id: str = None, bucket_name: str = None,
+                                 path: str = None, allow_external_delete: bool = True) -> dict:
+        """
+        Create a faasProxy storage driver.
+        
+        Args:
+            project_id: Project ID (if None, uses self.project_id)
+            driver_name: Driver name
+            integration_id: GCS integration ID
+            bucket_name: GCS bucket name
+            path: Optional path within bucket
+            allow_external_delete: Allow external delete
+        
+        Returns:
+            dict with driver info
+        """
+        try:
+            if project_id is None:
+                project_id = self.project_id
+            project = dl.projects.get(project_id=project_id)
+            
+            # Get integration
+            organization = project.org
+            all_integrations = organization.integrations.list()
+            integration = None
+            
+            for int_obj in all_integrations:
+                int_id = int_obj.get('id') if isinstance(int_obj, dict) else getattr(int_obj, 'id', None)
+                if int_id == integration_id:
+                    integration = int_obj
+                    break
+            
+            if integration is None:
+                return {
+                    'success': False,
+                    'error': f'Integration {integration_id} not found'
+                }
+            
+            # Check if driver already exists
+            existing_drivers = self.list_faas_proxy_drivers(project_id=project_id)
+            if existing_drivers.get('success'):
+                for driver_info in existing_drivers.get('drivers', []):
+                    if driver_info['name'] == driver_name:
+                        return {
+                            'success': True,
+                            'driver': driver_info,
+                            'exists': True,
+                            'message': 'Driver already exists'
+                        }
+            
+            # Get integration type
+            integration_type = None
+            if isinstance(integration, dict):
+                integration_type = integration.get('type')
+                integration_id_val = integration.get('id')
+            else:
+                if hasattr(integration, 'type'):
+                    integration_type = integration.type
+                elif hasattr(integration, 'integrations_type'):
+                    integration_type = integration.integrations_type
+                integration_id_val = getattr(integration, 'id', None)
+            
+            if integration_type is None:
+                integration_type = dl.ExternalStorage.GCS
+            
+            # Convert integration_type to string
+            if hasattr(integration_type, 'value'):
+                integration_type_str = integration_type.value
+            elif isinstance(integration_type, str):
+                integration_type_str = integration_type
+            else:
+                integration_type_str = str(integration_type).lower()
+            
+            # Get organization ID
+            org_id = organization.id
+            
+            # Build payload
+            payload = {
+                "integrationId": integration_id_val,
+                "integrationType": integration_type_str,
+                "name": driver_name,
+                "metadata": {
+                    "system": {
+                        "projectId": project.id
+                    }
+                },
+                "type": "faasProxy",
+                "payload": {
+                    "bucket": bucket_name
+                },
+                "allowExternalDelete": allow_external_delete,
+                "creator": project._client_api.info().get("user_email", ""),
+            }
+            
+            if path:
+                payload["payload"]["path"] = path
+            
+            # Create driver using direct API call
+            url = f"/organizations/{org_id}/storage-drivers"
+            success, response = project._client_api.gen_request(
+                req_type='post',
+                path=url,
+                json_req=payload
+            )
+            
+            if not success:
+                error_msg = response if isinstance(response, str) else str(response)
+                return {
+                    'success': False,
+                    'error': f'Failed to create driver: {error_msg}'
+                }
+            
+            # Parse response
+            if isinstance(response, dict):
+                driver_data = response
+            elif hasattr(response, 'json'):
+                driver_data = response.json()
+            else:
+                driver_data = response
+            
+            driver_id = driver_data.get('id') or driver_data.get('driverId')
+            driver_name_result = driver_data.get('name', driver_name)
+            
+            if not driver_id:
+                return {
+                    'success': False,
+                    'error': f'Driver created but no ID returned: {driver_data}'
+                }
+            
+            return {
+                'success': True,
+                'driver': {
+                    'id': driver_id,
+                    'name': driver_name_result,
+                    'type': 'faasProxy',
+                    'bucket': bucket_name,
+                    'path': path
+                },
+                'exists': False,
+                'message': 'Driver created successfully'
+            }
+        except Exception as e:
+            logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e)
+            }
+    
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None) -> dict:
         """
         Download images from COCO to NFS storage.
@@ -1774,7 +2099,7 @@ class StressTestServer(dl.BaseServiceRunner):
             'sample_items': created[:5] if created else []
         }
     
-    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None, pipeline_concurrency: int = 8, pipeline_max_replicas: int = 12) -> dict:
+    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None, pipeline_concurrency: int = 30, pipeline_max_replicas: int = 12) -> dict:
         """
         Create stress test pipeline with ResNet model node.
         Installs the ResNet DPK if not already installed.
@@ -3412,7 +3737,7 @@ class ServiceRunner:
                              driver_id: str = None,
                              pipeline_name: str = None,
                              num_workers: int = 50,
-                             pipeline_concurrency: int = 8,
+                             pipeline_concurrency: int = 30,
                              pipeline_max_replicas: int = 12,
                              coco_dataset: str = 'all',
                              create_dataset: bool = False,

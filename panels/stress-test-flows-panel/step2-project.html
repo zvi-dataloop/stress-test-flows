@@ -8,11 +8,11 @@
     <style>
         :root {
             --bg-primary: #ffffff; --bg-secondary: #f8fafc; --bg-tertiary: #f1f5f9; --bg-card: #ffffff;
-            --accent-primary: #0ea5e9; --accent-secondary: #6366f1; --accent-success: #10b981; --accent-warning: #f59e0b;
+            --accent-primary: #0ea5e9; --accent-secondary: #6366f1; --accent-success: #10b981; --accent-warning: #f59e0b; --accent-error: #ef4444;
             --text-primary: #0f172a; --text-secondary: #475569; --text-muted: #94a3b8;
             --border-color: #e2e8f0;
             --gradient-1: linear-gradient(135deg, #0ea5e9 0%, #6366f1 100%);
-            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05); --shadow-md: 0 4px 6px rgba(0,0,0,0.1);
         }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--bg-secondary); color: var(--text-primary); min-height: 100vh; }
@@ -31,23 +31,41 @@
         .card { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 16px; padding: 28px; margin-bottom: 24px; box-shadow: var(--shadow-sm); }
         .card h2 { font-size: 18px; margin-bottom: 20px; color: var(--text-primary); }
 
-        .code-block { background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 10px; padding: 16px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-primary); overflow-x: auto; white-space: pre; }
-        .code-block.large { padding: 20px; }
-
-        .step-list { display: flex; flex-direction: column; gap: 16px; }
-        .step-item { display: flex; gap: 16px; padding: 20px; background: var(--bg-tertiary); border-radius: 12px; }
-        .step-num { width: 36px; height: 36px; background: var(--gradient-1); border-radius: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700; color: white; flex-shrink: 0; font-size: 14px; }
-        .step-content h3 { font-size: 15px; margin-bottom: 6px; color: var(--text-primary); }
-        .step-content p { color: var(--text-secondary); font-size: 14px; line-height: 1.5; }
-
         .info-box { background: rgba(14, 165, 233, 0.08); border: 1px solid var(--accent-primary); border-radius: 12px; padding: 16px; margin-top: 16px; }
-        .info-box p { font-size: 13px; color: var(--text-secondary); }
+        .info-box p { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
+        .info-box p:last-child { margin-bottom: 0; }
         .info-box strong { color: var(--accent-primary); }
+        .info-box a { color: var(--accent-primary); text-decoration: none; }
+        .info-box a:hover { text-decoration: underline; }
+
+        .form-group { margin-bottom: 20px; }
+        .form-group label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary); }
+        .form-group input, .form-group select { width: 100%; padding: 10px 14px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; }
+        .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent-primary); }
+        .form-group small { display: block; margin-top: 6px; font-size: 12px; color: var(--text-muted); }
+
+        .btn { padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; border: none; cursor: pointer; transition: all 0.2s; }
+        .btn-primary { background: var(--gradient-1); color: white; }
+        .btn-primary:hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+        .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); }
+        .btn-secondary:hover { border-color: var(--accent-primary); color: var(--accent-primary); }
+
+        .status-message { padding: 12px 16px; border-radius: 8px; margin-bottom: 16px; font-size: 14px; }
+        .status-message.success { background: rgba(16, 185, 129, 0.1); border: 1px solid var(--accent-success); color: #065f46; }
+        .status-message.error { background: rgba(239, 68, 68, 0.1); border: 1px solid var(--accent-error); color: #991b1b; }
+        .status-message.info { background: rgba(14, 165, 233, 0.1); border: 1px solid var(--accent-primary); color: #0c4a6e; }
+
+        .list-item { padding: 12px 16px; background: var(--bg-tertiary); border-radius: 8px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center; }
+        .list-item-name { font-weight: 600; color: var(--text-primary); }
+        .list-item-id { font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); }
+        .list-item-actions { display: flex; gap: 8px; }
+        .btn-small { padding: 6px 12px; font-size: 12px; }
+
+        .loading { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border-color); border-top-color: var(--accent-primary); border-radius: 50%; animation: spin 0.6s linear infinite; }
+        @keyframes spin { to { transform: rotate(360deg); } }
 
         .nav-buttons { display: flex; justify-content: space-between; margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border-color); }
-        .btn { padding: 12px 24px; border-radius: 10px; font-size: 14px; font-weight: 600; text-decoration: none; display: inline-flex; align-items: center; gap: 8px; }
-        .btn-primary { background: var(--gradient-1); color: white; }
-        .btn-secondary { background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); }
     </style>
 </head>
 <body>
@@ -59,7 +77,7 @@
             <div class="step-badge">2</div>
             <div class="page-title">
                 <h1>Project & Dataset</h1>
-                <p>Create project and faasProxy dataset in the organization</p>
+                <p>Create faasProxy storage driver for your project</p>
             </div>
         </div>
         <nav class="flow-nav">
@@ -73,63 +91,76 @@
         </nav>
 
         <div class="card">
-            <h2>Create Project</h2>
+            <h2>faasProxy Storage Driver</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Create a project in your organization for stress testing. The project will contain datasets and pipelines.
+                The faasProxy driver is built as a layer above the GCS driver and is needed to store JSON files. 
+                It allows datasets to reference files stored in FaaS Filestore without copying them (using link items).
             </p>
+            <div class="info-box">
+                <p><strong>Prerequisites:</strong></p>
+                <p>• You need a GCS integration in your organization</p>
+                <p>• See Dataloop documentation: <a href="https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter" target="_blank">GCS Integration Guide</a></p>
+                <p>• <a href="https://docs.dataloop.ai/docs/cross-project-integration" target="_blank">Cross-Project Integration</a> (recommended) or <a href="https://docs.dataloop.ai/docs/private-key-integration" target="_blank">Private Key Integration</a></p>
+            </div>
         </div>
 
         <div class="card">
-            <h2>Create faasProxy Dataset</h2>
+            <h2>Check Existing Drivers</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Create a dataset with the faasProxy storage driver. This driver allows the dataset to reference files stored in the FaaS Filestore without copying them, using link items.
+                Check if a faasProxy driver already exists in your project.
             </p>
-            <div class="info-box">
-                <p><strong>Retrieving Storage Driver ID:</strong> To get the storage driver ID for faasProxy type in your organization, use the following approach:</p>
-            </div>
-            <div class="code-block large">import dtlpy as dl
-import requests
+            <button class="btn btn-secondary" onclick="loadDrivers()">🔄 Refresh Drivers List</button>
+            <div id="driversList" style="margin-top: 16px;"></div>
+        </div>
 
-# Login
-dl.login()
+        <div class="card">
+            <h2>Create faasProxy Driver</h2>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 20px;">
+                Create a new faasProxy storage driver. You can use an existing GCS integration or create a new one.
+            </p>
+            
+            <button class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
+            <div id="integrationsList" style="margin-bottom: 20px;"></div>
 
-# Get your organization
-org = dl.organizations.get(organization_id='YOUR_ORG_ID')
+            <div id="statusMessage"></div>
 
-# Get storage drivers for the organization
-headers = {'Authorization': f'Bearer {dl.token()}'}
-base_url = dl.environment()
+            <form id="driverForm" onsubmit="createDriver(event)">
+                <div class="form-group">
+                    <label for="driverName">Driver Name *</label>
+                    <input type="text" id="driverName" required placeholder="e.g., faas-proxy-driver">
+                </div>
 
-# List storage drivers
-response = requests.get(
-    f"{base_url}/organizations/{org.id}/storage-drivers",
-    headers=headers
-)
+                <div class="form-group">
+                    <label for="integrationId">GCS Integration *</label>
+                    <select id="integrationId" required>
+                        <option value="">Select an integration...</option>
+                    </select>
+                    <small>Select an existing GCS integration from the list above</small>
+                </div>
 
-if response.status_code == 200:
-    drivers = response.json()
-    
-    # Find faasProxy driver
-    faas_proxy_driver = None
-    for driver in drivers:
-        if driver.get('type') == 'faasProxy' or driver.get('driverType') == 'faasProxy':
-            faas_proxy_driver = driver
-            break
-    
-    if faas_proxy_driver:
-        driver_id = faas_proxy_driver.get('id') or faas_proxy_driver.get('driverId')
-        print(f"Found faasProxy driver ID: {driver_id}")
-        print(f"Driver details: {faas_proxy_driver}")
-    else:
-        print("faasProxy driver not found in organization")
-else:
-    print(f"Failed to get storage drivers: {response.status_code} - {response.text}")
+                <div class="form-group">
+                    <label for="bucketName">GCS Bucket Name *</label>
+                    <input type="text" id="bucketName" required placeholder="e.g., my-gcs-bucket">
+                </div>
 
-# Use the driver_id when creating dataset
-# dataset = project.datasets.create(
-#     dataset_name='benchmark-images',
-#     driver_id=driver_id  # Use the retrieved driver ID
-# )</div>
+                <div class="form-group">
+                    <label for="path">Path (Optional)</label>
+                    <input type="text" id="path" placeholder="e.g., folder/subfolder (leave empty for root)">
+                    <small>Optional path within the bucket</small>
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="allowExternalDelete" checked style="width: auto; margin-right: 8px;">
+                        Allow External Delete
+                    </label>
+                    <small>Allow deleting items from storage through Dataloop platform</small>
+                </div>
+
+                <button type="submit" class="btn btn-primary" id="createBtn">🚀 Create faasProxy Driver</button>
+            </form>
+
+            <div id="driverResult" style="margin-top: 20px;"></div>
         </div>
 
         <div class="nav-buttons">
@@ -137,6 +168,149 @@ else:
             <a href="step3-download-images.html" class="btn btn-primary">Next: Download Images →</a>
         </div>
     </div>
+
+    <script>
+        let integrations = [];
+        let drivers = [];
+
+        async function loadIntegrations() {
+            const listDiv = document.getElementById('integrationsList');
+            listDiv.innerHTML = '<div class="loading"></div> Loading integrations...';
+            
+            try {
+                const response = await fetch('/api/gcs-integrations');
+                const data = await response.json();
+                
+                if (data.success && data.integrations.length > 0) {
+                    integrations = data.integrations;
+                    let html = '<h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary);">Available GCS Integrations:</h3>';
+                    data.integrations.forEach(int => {
+                        html += `
+                            <div class="list-item">
+                                <div>
+                                    <div class="list-item-name">${int.name}</div>
+                                    <div class="list-item-id">ID: ${int.id}</div>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    listDiv.innerHTML = html;
+                    
+                    // Populate select dropdown
+                    const select = document.getElementById('integrationId');
+                    select.innerHTML = '<option value="">Select an integration...</option>';
+                    data.integrations.forEach(int => {
+                        const option = document.createElement('option');
+                        option.value = int.id;
+                        option.textContent = `${int.name} (${int.id.substring(0, 8)}...)`;
+                        select.appendChild(option);
+                    });
+                } else {
+                    listDiv.innerHTML = '<div class="status-message info">No GCS integrations found. Please create one first. See documentation links above.</div>';
+                }
+            } catch (error) {
+                listDiv.innerHTML = `<div class="status-message error">Error loading integrations: ${error.message}</div>`;
+            }
+        }
+
+        async function loadDrivers() {
+            const listDiv = document.getElementById('driversList');
+            listDiv.innerHTML = '<div class="loading"></div> Loading drivers...';
+            
+            try {
+                const response = await fetch('/api/faas-proxy-drivers');
+                const data = await response.json();
+                
+                if (data.success && data.drivers.length > 0) {
+                    drivers = data.drivers;
+                    let html = '<h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary);">Existing faasProxy Drivers:</h3>';
+                    data.drivers.forEach(driver => {
+                        html += `
+                            <div class="list-item">
+                                <div>
+                                    <div class="list-item-name">${driver.name}</div>
+                                    <div class="list-item-id">ID: ${driver.id} | Bucket: ${driver.bucket || 'N/A'}</div>
+                                </div>
+                                <div class="list-item-actions">
+                                    <button class="btn btn-small btn-secondary" onclick="copyDriverId('${driver.id}')">Copy ID</button>
+                                </div>
+                            </div>
+                        `;
+                    });
+                    listDiv.innerHTML = html;
+                } else {
+                    listDiv.innerHTML = '<div class="status-message info">No faasProxy drivers found in this project.</div>';
+                }
+            } catch (error) {
+                listDiv.innerHTML = `<div class="status-message error">Error loading drivers: ${error.message}</div>`;
+            }
+        }
+
+        function copyDriverId(driverId) {
+            navigator.clipboard.writeText(driverId).then(() => {
+                alert(`Driver ID copied to clipboard: ${driverId}`);
+            });
+        }
+
+        async function createDriver(event) {
+            event.preventDefault();
+            
+            const createBtn = document.getElementById('createBtn');
+            const statusDiv = document.getElementById('statusMessage');
+            const resultDiv = document.getElementById('driverResult');
+            
+            createBtn.disabled = true;
+            createBtn.innerHTML = '<span class="loading"></span> Creating...';
+            statusDiv.innerHTML = '';
+            resultDiv.innerHTML = '';
+            
+            const formData = {
+                driverName: document.getElementById('driverName').value,
+                integrationId: document.getElementById('integrationId').value,
+                bucketName: document.getElementById('bucketName').value,
+                path: document.getElementById('path').value || null,
+                allowExternalDelete: document.getElementById('allowExternalDelete').checked
+            };
+            
+            try {
+                const response = await fetch('/api/create-faas-proxy-driver', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusDiv.innerHTML = `<div class="status-message success">✓ ${data.exists ? 'Driver already exists' : 'Driver created successfully'}!</div>`;
+                    resultDiv.innerHTML = `
+                        <div class="info-box">
+                            <p><strong>Driver ID:</strong> <code style="font-family: 'JetBrains Mono', monospace; background: var(--bg-tertiary); padding: 4px 8px; border-radius: 4px;">${data.driver.id}</code></p>
+                            <p><strong>Driver Name:</strong> ${data.driver.name}</p>
+                            <p><strong>Bucket:</strong> ${data.driver.bucket}</p>
+                            <p style="margin-top: 12px;">Use this Driver ID when creating datasets in the workflow.</p>
+                            <button class="btn btn-small btn-primary" onclick="copyDriverId('${data.driver.id}')" style="margin-top: 8px;">Copy Driver ID</button>
+                        </div>
+                    `;
+                    
+                    // Reload drivers list
+                    loadDrivers();
+                } else {
+                    statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${data.error || 'Unknown error'}</div>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${error.message}</div>`;
+            } finally {
+                createBtn.disabled = false;
+                createBtn.innerHTML = '🚀 Create faasProxy Driver';
+            }
+        }
+
+        // Load integrations and drivers on page load
+        window.addEventListener('DOMContentLoaded', () => {
+            loadIntegrations();
+            loadDrivers();
+        });
+    </script>
 </body>
 </html>
-

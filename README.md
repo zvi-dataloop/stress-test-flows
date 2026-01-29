@@ -43,6 +43,82 @@ dpk/
    dl.login()
    ```
 
+3. **faasProxy Storage Driver**: The stress test workflow requires a faasProxy storage driver. 
+   The faasProxy driver is built as a layer above the GCS driver and is needed to store JSON files.
+   See [Creating faasProxy Driver](#creating-faasproxy-driver) section below.
+
+## Creating faasProxy Driver
+
+The faasProxy storage driver is required for the stress test workflow. It's built as a layer above the GCS driver and is needed to store JSON files.
+
+### Check Existing Drivers
+
+Before creating a new driver, check if one already exists (project name or ID is required):
+
+```bash
+# Simple check script
+python check_faas_proxy_drivers.py --project-name "your-project"
+python check_faas_proxy_drivers.py --project-id "your-project-id"
+
+# Or use the main script
+python create_faas_proxy_driver.py --check --project-name "your-project"
+python create_faas_proxy_driver.py --check --project-id "your-project-id"
+```
+
+### Quick Setup
+
+Use the provided script to create the faasProxy driver:
+
+```bash
+python create_faas_proxy_driver.py
+```
+
+The script will guide you through:
+1. **Login to Dataloop** - Enter your environment and credentials
+   - You can set `DTLPY_ENV` environment variable to specify the environment (default: `prod`)
+   - Example: `export DTLPY_ENV=ford` before running the script
+2. **Select Project** - Choose or create a project
+3. **GCS Integration Setup** - Use an existing GCS integration or create a new one
+   - If existing integrations are found, you can select one
+   - To create new: Option 1: Cross-Project Integration (recommended, requires IAM setup)
+   - To create new: Option 2: Private Key Integration (requires service account JSON key file)
+4. **Create faasProxy Driver** - Configure and create the driver
+
+### Prerequisites for GCS Integration
+
+Before creating the faasProxy driver, you need to create a GCS integration in your Dataloop organization. See the Dataloop documentation for detailed instructions:
+
+- **GCS Integration Guide**: https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter
+- **Cross-Project Integration** (recommended for GCP): https://docs.dataloop.ai/docs/cross-project-integration
+- **Private Key Integration**: https://docs.dataloop.ai/docs/private-key-integration
+
+### Manual Setup
+
+If you prefer to set up manually:
+
+2. **Create faasProxy Driver using SDK:**
+   ```python
+   project = dl.projects.get(project_name='YOUR_PROJECT')
+   
+   driver = project.drivers.create(
+       name='faas-proxy-driver',
+       driver_type='faasProxy',  # Use 'faasProxy' as the driver type
+       integration_id=integration.id,
+       bucket_name='your-bucket-name',
+       allow_external_delete=True
+   )
+   
+   print(f"Driver ID: {driver.id}")
+   ```
+
+### Why faasProxy Driver?
+
+The faasProxy driver is specifically needed because:
+- It's built as a layer above the GCS driver
+- It enables storing JSON files in the dataset
+- It allows datasets to reference files stored in FaaS Filestore without copying them (using link items)
+- It's required for the stress test workflow to function properly
+
 ## Deployment
 
 ```bash
