@@ -1574,44 +1574,51 @@ class StressTestServer(dl.BaseServiceRunner):
         only when the bot/user has org access.
         
         Returns:
-            dict with hasOrgPermission, orgId, orgName, currentIdentity, message
+            dict with xhasOrgPermission, orgId, orgName, currentIdentity, botUserName, message
         """
         try:
             project = dl.projects.get(project_id=self.project_id)
-            # Get org - handle dict and SDK object
+            # Get org_id and org_name from project ONLY (no org API call yet - we may not have org access)
+            org_id = None
+            org_name = None
             if isinstance(project.org, dict):
                 org_id = project.org.get('id')
-                org_name = project.org.get('name', '') or project.org.get('title', '')
-                if not org_id:
-                    return {
-                        'success': True,
-                        'hasOrgPermission': False,
-                        'orgId': None,
-                        'orgName': None,
-                        'currentIdentity': None,
-                        'botUserName': None,
-                        'message': 'Could not get organization ID from project'
-                    }
-                organization = dl.organizations.get(organization_id=org_id)
+                org_name = (project.org.get('name') or project.org.get('title') or '') if org_id else ''
             else:
-                organization = project.org
-                org_id = getattr(organization, 'id', None)
-                org_name = getattr(organization, 'name', None) or getattr(organization, 'title', '')
-            
-            if not org_name and organization:
                 try:
-                    org_name = organization.name if hasattr(organization, 'name') else (organization.get('name') if isinstance(organization, dict) else str(org_id))
+                    org_id = getattr(project.org, 'id', None)
+                    org_name = getattr(project.org, 'name', None) or getattr(project.org, 'title', None) or ''
                 except Exception:
-                    org_name = org_id or 'Unknown'
-            
-            # Current identity (bot or user email)
+                    pass
+            if not org_id and hasattr(project, 'to_json'):
+                try:
+                    j = project.to_json() or {}
+                    org_id = j.get('orgId') or (j.get('org') or {}).get('id') if isinstance(j.get('org'), dict) else j.get('org')
+                    if isinstance(org_id, dict):
+                        org_id = org_id.get('id')
+                except Exception:
+                    pass
+            if not org_id:
+                return {
+                    'success': True,
+                    'hasOrgPermission': False,
+                    'orgId': None,
+                    'orgName': None,
+                    'currentIdentity': None,
+                    'botUserName': None,
+                    'message': 'Could not get organization ID from project'
+                }
+            if not org_name:
+                org_name = org_id
+
+            # Current identity (bot or user email) - project-level only
             current_identity = None
             try:
                 current_identity = project._client_api.info().get('user_email') or project._client_api.info().get('email') or project._client_api.info().get('username')
             except Exception:
                 pass
-            
-            # Service bot username (for "add this bot to org" message)
+
+            # Service bot username (for "add this bot to org" message) - project-level only, no org access needed
             # How we get it: 1) SERVICE_ID env -> get service -> read botUserName from entity/JSON
             #                2) Fallback: list services, find by package name "nginx-stress-test"
             #                3) From entity: attributes bot_user_name, botUserName, bot_username; or JSON keys; or nested bot.username
@@ -1722,9 +1729,10 @@ class StressTestServer(dl.BaseServiceRunner):
                         logger.warning(f"Direct API GET /services/... failed: {e}")
             except Exception as e:
                 logger.warning(f"Could not get service botUserName: {e}", exc_info=True)
-            
-            # Try to list integrations - if this succeeds, we have org permission
+
+            # Only now try to access organization (may fail if no org permission)
             try:
+                organization = dl.organizations.get(organization_id=org_id)
                 organization.integrations.list()
                 return {
                     'success': True,
@@ -1736,7 +1744,7 @@ class StressTestServer(dl.BaseServiceRunner):
                     'message': None
                 }
             except Exception as e:
-                logger.info(f"Org integration list failed (no org permission): {e}")
+                logger.info(f"Org access failed (no org permission): {e}")
                 return {
                     'success': True,
                     'hasOrgPermission': False,
