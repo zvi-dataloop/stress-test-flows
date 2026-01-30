@@ -143,7 +143,7 @@ python create_faas_proxy_driver.py</p>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
                 Check if a faasProxy driver already exists in your project.
             </p>
-            <button class="btn btn-secondary" onclick="loadDrivers()">🔄 Refresh Drivers List</button>
+            <button type="button" class="btn btn-secondary" onclick="loadDrivers()">🔄 Refresh Drivers List</button>
             <div id="driversList" style="margin-top: 16px;"></div>
         </div>
 
@@ -165,7 +165,7 @@ python create_faas_proxy_driver.py</p>
             </div>
 
             <div id="integrationSelectMode" style="margin-bottom: 20px;">
-                <button class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
+                <button type="button" class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
                 <div id="integrationsList" style="margin-bottom: 20px;"></div>
             </div>
 
@@ -178,7 +178,7 @@ python create_faas_proxy_driver.py</p>
 
             <div id="statusMessage"></div>
 
-            <form id="driverForm" onsubmit="createDriver(event)">
+            <form id="driverForm" novalidate>
                 <div class="form-group">
                     <label for="driverName">Driver Name *</label>
                     <input type="text" id="driverName" required placeholder="e.g., faas-proxy-driver">
@@ -228,7 +228,7 @@ python create_faas_proxy_driver.py</p>
                     <small>Allow deleting items from storage through Dataloop platform</small>
                 </div>
 
-                <button type="submit" class="btn btn-primary" id="createBtn">🚀 Create faasProxy Driver</button>
+                <button type="button" class="btn btn-primary" id="createBtn">🚀 Create faasProxy Driver</button>
             </form>
 
             <div id="driverResult" style="margin-top: 20px;"></div>
@@ -354,7 +354,7 @@ python create_faas_proxy_driver.py</p>
         }
 
         async function createDriver(event) {
-            event.preventDefault();
+            if (event && event.preventDefault) event.preventDefault();
             
             const createBtn = document.getElementById('createBtn');
             const statusDiv = document.getElementById('statusMessage');
@@ -484,6 +484,21 @@ python create_faas_proxy_driver.py</p>
         // Check org access first, then show driver UI or no-permission message
         window.addEventListener('DOMContentLoaded', () => {
             checkOrgAccess();
+            // Attach Create button click so the request is always sent (no reliance on form submit)
+            var createBtn = document.getElementById('createBtn');
+            var driverForm = document.getElementById('driverForm');
+            if (createBtn) {
+                createBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    createDriver(e);
+                });
+            }
+            if (driverForm) {
+                driverForm.addEventListener('submit', function(e) {
+                    e.preventDefault();
+                    createDriver(e);
+                });
+            }
         });
     </script>
 </body>
