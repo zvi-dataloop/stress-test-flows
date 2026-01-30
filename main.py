@@ -2020,7 +2020,7 @@ class StressTestServer(dl.BaseServiceRunner):
                 payload["payload"]["path"] = path
             
             # Create driver using direct API call
-            url = f"/organizations/{org_id}/storage-drivers"
+            url = f"/drivers"
             success, response = project._client_api.gen_request(
                 req_type='post',
                 path=url,
