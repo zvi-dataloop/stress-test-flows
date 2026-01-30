@@ -1613,15 +1613,70 @@ class StressTestServer(dl.BaseServiceRunner):
             
             # Service bot username (for "add this bot to org" message)
             bot_user_name = None
+            service_obj = None
             try:
-                service_id = os.environ.get('SERVICE_ID') or os.environ.get('DL_SERVICE_ID')
+                # Try env vars set by agent when running the service
+                service_id = (
+                    os.environ.get('SERVICE_ID') or
+                    os.environ.get('DL_SERVICE_ID') or
+                    os.environ.get('DTLPY_SERVICE_ID')
+                )
                 if service_id:
-                    service = project.services.get(service_id=service_id)
-                    bot_user_name = getattr(service, 'bot_user_name', None) or getattr(service, 'botUserName', None)
-                    if not bot_user_name and isinstance(service, dict):
-                        bot_user_name = service.get('bot_user_name') or service.get('botUserName')
+                    service_obj = project.services.get(service_id=service_id)
+                if not service_obj:
+                    # Fallback: find "this" service by package name (DPK app name)
+                    package_name = os.environ.get('PACKAGE_NAME') or 'nginx-stress-test'
+                    for svc in project.services.list():
+                        pkg_name = None
+                        if hasattr(svc, 'package') and svc.package:
+                            pkg_name = getattr(svc.package, 'name', None)
+                        if not pkg_name and hasattr(svc, 'to_json'):
+                            try:
+                                j = svc.to_json()
+                                pkg = j.get('package') or j.get('packageId')
+                                if isinstance(pkg, dict):
+                                    pkg_name = pkg.get('name')
+                            except Exception:
+                                pass
+                        if pkg_name == package_name:
+                            service_obj = svc
+                            break
+                if service_obj:
+                    # Prefer attribute (SDK may use snake_case or camelCase)
+                    bot_user_name = (
+                        getattr(service_obj, 'bot_user_name', None) or
+                        getattr(service_obj, 'botUserName', None) or
+                        getattr(service_obj, 'bot_username', None)
+                    )
+                    if not bot_user_name:
+                        # API often returns camelCase; try from dict/json
+                        def _from_json(j):
+                            if not isinstance(j, dict):
+                                return None
+                            v = j.get('botUserName') or j.get('bot_user_name') or j.get('bot_username')
+                            if not v and isinstance(j.get('bot'), dict):
+                                v = j['bot'].get('username') or j['bot'].get('userName') or j['bot'].get('email')
+                            return v
+                        if isinstance(service_obj, dict):
+                            bot_user_name = _from_json(service_obj)
+                        elif hasattr(service_obj, 'to_json'):
+                            try:
+                                bot_user_name = _from_json(service_obj.to_json() or {})
+                            except Exception:
+                                pass
+                        if not bot_user_name and hasattr(service_obj, '_json'):
+                            try:
+                                bot_user_name = _from_json(getattr(service_obj, '_json', {}) or {})
+                            except Exception:
+                                pass
+                    if bot_user_name:
+                        logger.info(f"Resolved service botUserName: {bot_user_name}")
+                    else:
+                        _j = getattr(service_obj, '_json', None) if service_obj else None
+                        _keys = list(_j.keys()) if isinstance(_j, dict) else 'N/A'
+                        logger.warning(f"Service found but botUserName not on entity (id={getattr(service_obj, 'id', None)}). Keys: {_keys}")
             except Exception as e:
-                logger.debug(f"Could not get service botUserName: {e}")
+                logger.warning(f"Could not get service botUserName: {e}", exc_info=True)
             
             # Try to list integrations - if this succeeds, we have org permission
             try:
