@@ -1612,51 +1612,76 @@ class StressTestServer(dl.BaseServiceRunner):
                 pass
             
             # Service bot username (for "add this bot to org" message)
+            # How we get it: 1) SERVICE_ID env -> get service -> read botUserName from entity/JSON
+            #                2) Fallback: list services, find by package name "nginx-stress-test"
+            #                3) From entity: attributes bot_user_name, botUserName, bot_username; or JSON keys; or nested bot.username
+            #                4) Direct API GET /services/{id} and scan raw JSON for any bot-related key
             bot_user_name = None
             service_obj = None
             try:
-                # Try env vars set by agent when running the service
                 service_id = (
                     os.environ.get('SERVICE_ID') or
                     os.environ.get('DL_SERVICE_ID') or
                     os.environ.get('DTLPY_SERVICE_ID')
                 )
+                logger.info(f"botUserName lookup: SERVICE_ID env={service_id!r}, PROJECT_ID={self.project_id!r}")
                 if service_id:
-                    service_obj = project.services.get(service_id=service_id)
+                    try:
+                        service_obj = project.services.get(service_id=service_id)
+                        logger.info(f"botUserName lookup: got service by id {service_id}")
+                    except Exception as e:
+                        logger.warning(f"botUserName lookup: project.services.get(service_id) failed: {e}")
                 if not service_obj:
-                    # Fallback: find "this" service by package name (DPK app name)
-                    package_name = os.environ.get('PACKAGE_NAME') or 'nginx-stress-test'
-                    for svc in project.services.list():
-                        pkg_name = None
-                        if hasattr(svc, 'package') and svc.package:
-                            pkg_name = getattr(svc.package, 'name', None)
-                        if not pkg_name and hasattr(svc, 'to_json'):
-                            try:
-                                j = svc.to_json()
+                    # Match "this" DPK app service: app.dpkName is "nginx-stress-test", or moduleName is "stress-test-server"
+                    dpk_name = os.environ.get('PACKAGE_NAME') or 'nginx-stress-test'
+                    module_name = 'stress-test-server'
+                    logger.info(f"botUserName lookup: fallback listing services for dpk_name={dpk_name!r} or moduleName={module_name!r}")
+                    try:
+                        for svc in project.services.list():
+                            j = None
+                            if hasattr(svc, 'to_json'):
+                                try:
+                                    j = svc.to_json() or {}
+                                except Exception:
+                                    pass
+                            if not isinstance(j, dict) and hasattr(svc, '_json'):
+                                j = getattr(svc, '_json', None) or {}
+                            if not isinstance(j, dict):
+                                continue
+                            # API returns app.dpkName and moduleName (not package.name)
+                            app_dpk = (j.get('app') or {}) if isinstance(j.get('app'), dict) else {}
+                            if app_dpk.get('dpkName') == dpk_name or j.get('moduleName') == module_name:
+                                service_obj = svc
+                                logger.info(f"botUserName lookup: found service by app.dpkName/moduleName, id={j.get('id') or getattr(svc, 'id', None)}")
+                                break
+                            # Legacy: package.name
+                            pkg_name = None
+                            if hasattr(svc, 'package') and svc.package:
+                                pkg_name = getattr(svc.package, 'name', None)
+                            if not pkg_name and isinstance(j, dict):
                                 pkg = j.get('package') or j.get('packageId')
                                 if isinstance(pkg, dict):
                                     pkg_name = pkg.get('name')
-                            except Exception:
-                                pass
-                        if pkg_name == package_name:
-                            service_obj = svc
-                            break
+                            if pkg_name == dpk_name:
+                                service_obj = svc
+                                logger.info(f"botUserName lookup: found service by package name, id={getattr(svc, 'id', None)}")
+                                break
+                    except Exception as e:
+                        logger.warning(f"botUserName lookup: list services failed: {e}")
                 if service_obj:
-                    # Prefer attribute (SDK may use snake_case or camelCase)
+                    def _from_json(j):
+                        if not isinstance(j, dict):
+                            return None
+                        v = j.get('botUserName') or j.get('bot_user_name') or j.get('bot_username')
+                        if not v and isinstance(j.get('bot'), dict):
+                            v = j['bot'].get('username') or j['bot'].get('userName') or j['bot'].get('email')
+                        return v
                     bot_user_name = (
                         getattr(service_obj, 'bot_user_name', None) or
                         getattr(service_obj, 'botUserName', None) or
                         getattr(service_obj, 'bot_username', None)
                     )
                     if not bot_user_name:
-                        # API often returns camelCase; try from dict/json
-                        def _from_json(j):
-                            if not isinstance(j, dict):
-                                return None
-                            v = j.get('botUserName') or j.get('bot_user_name') or j.get('bot_username')
-                            if not v and isinstance(j.get('bot'), dict):
-                                v = j['bot'].get('username') or j['bot'].get('userName') or j['bot'].get('email')
-                            return v
                         if isinstance(service_obj, dict):
                             bot_user_name = _from_json(service_obj)
                         elif hasattr(service_obj, 'to_json'):
@@ -1674,7 +1699,27 @@ class StressTestServer(dl.BaseServiceRunner):
                     else:
                         _j = getattr(service_obj, '_json', None) if service_obj else None
                         _keys = list(_j.keys()) if isinstance(_j, dict) else 'N/A'
-                        logger.warning(f"Service found but botUserName not on entity (id={getattr(service_obj, 'id', None)}). Keys: {_keys}")
+                        logger.warning(f"Service entity has no botUserName. Service id={getattr(service_obj, 'id', None)}, keys={_keys}")
+                # Direct API: GET service and scan raw JSON for any bot-related key (in case SDK strips it)
+                if not bot_user_name and (service_id or (service_obj and getattr(service_obj, 'id', None))):
+                    sid = service_id or getattr(service_obj, 'id', None)
+                    try:
+                        success, raw = project._client_api.gen_request(req_type='get', path=f'/services/{sid}')
+                        if success and isinstance(raw, dict):
+                            for key in ('botUserName', 'bot_user_name', 'bot_username', 'botUsername'):
+                                if raw.get(key):
+                                    bot_user_name = raw.get(key)
+                                    logger.info(f"Resolved service botUserName from API key {key!r}: {bot_user_name}")
+                                    break
+                            if not bot_user_name and isinstance(raw.get('bot'), dict):
+                                b = raw['bot']
+                                bot_user_name = b.get('username') or b.get('userName') or b.get('email')
+                                if bot_user_name:
+                                    logger.info(f"Resolved service botUserName from API bot.*: {bot_user_name}")
+                            if not bot_user_name:
+                                logger.warning(f"API service response keys (no bot field found): {list(raw.keys())}")
+                    except Exception as e:
+                        logger.warning(f"Direct API GET /services/... failed: {e}")
             except Exception as e:
                 logger.warning(f"Could not get service botUserName: {e}", exc_info=True)
             
