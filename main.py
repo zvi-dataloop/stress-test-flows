@@ -189,6 +189,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._list_gcs_integrations()
         elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
             self._list_faas_proxy_drivers()
+        elif path == '/api/org-access' or path.startswith('/api/org-access'):
+            self._check_org_access()
         else:
             # Handle static file paths
             # Ensure root path serves index.html
@@ -400,6 +402,23 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             logger.error(f"Error listing faasProxy drivers: {e}", exc_info=True)
             self._send_json({'success': False, 'error': str(e), 'drivers': []})
     
+    def _check_org_access(self):
+        """Check if current identity has org-level permission"""
+        try:
+            result = _stress_test_server_instance.check_org_access()
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error checking org access: {e}", exc_info=True)
+            self._send_json({
+                'success': False,
+                'hasOrgPermission': False,
+                'orgId': None,
+                'orgName': None,
+                'currentIdentity': None,
+                'botUserName': None,
+                'message': str(e)
+            })
+    
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
         try:
@@ -408,6 +427,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             
             driver_name = data.get('driverName') or data.get('driver_name')
             integration_id = data.get('integrationId') or data.get('integration_id')
+            integration_type = data.get('integrationType') or data.get('integration_type')
             bucket_name = data.get('bucketName') or data.get('bucket_name')
             path = data.get('path')
             allow_external_delete = data.get('allowExternalDelete', data.get('allow_external_delete', True))
@@ -420,6 +440,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 project_id=project_id,
                 driver_name=driver_name,
                 integration_id=integration_id,
+                integration_type=integration_type,
                 bucket_name=bucket_name,
                 path=path,
                 allow_external_delete=allow_external_delete
@@ -1546,6 +1567,97 @@ class StressTestServer(dl.BaseServiceRunner):
                 'driver_id': driver_id
             }
     
+    def check_org_access(self) -> dict:
+        """
+        Check if the current service/user has organization-level permission
+        (e.g. can list integrations). Used by the UI to show full driver form
+        only when the bot/user has org access.
+        
+        Returns:
+            dict with hasOrgPermission, orgId, orgName, currentIdentity, message
+        """
+        try:
+            project = dl.projects.get(project_id=self.project_id)
+            # Get org - handle dict and SDK object
+            if isinstance(project.org, dict):
+                org_id = project.org.get('id')
+                org_name = project.org.get('name', '') or project.org.get('title', '')
+                if not org_id:
+                    return {
+                        'success': True,
+                        'hasOrgPermission': False,
+                        'orgId': None,
+                        'orgName': None,
+                        'currentIdentity': None,
+                        'botUserName': None,
+                        'message': 'Could not get organization ID from project'
+                    }
+                organization = dl.organizations.get(organization_id=org_id)
+            else:
+                organization = project.org
+                org_id = getattr(organization, 'id', None)
+                org_name = getattr(organization, 'name', None) or getattr(organization, 'title', '')
+            
+            if not org_name and organization:
+                try:
+                    org_name = organization.name if hasattr(organization, 'name') else (organization.get('name') if isinstance(organization, dict) else str(org_id))
+                except Exception:
+                    org_name = org_id or 'Unknown'
+            
+            # Current identity (bot or user email)
+            current_identity = None
+            try:
+                current_identity = project._client_api.info().get('user_email') or project._client_api.info().get('email') or project._client_api.info().get('username')
+            except Exception:
+                pass
+            
+            # Service bot username (for "add this bot to org" message)
+            bot_user_name = None
+            try:
+                service_id = os.environ.get('SERVICE_ID') or os.environ.get('DL_SERVICE_ID')
+                if service_id:
+                    service = project.services.get(service_id=service_id)
+                    bot_user_name = getattr(service, 'bot_user_name', None) or getattr(service, 'botUserName', None)
+                    if not bot_user_name and isinstance(service, dict):
+                        bot_user_name = service.get('bot_user_name') or service.get('botUserName')
+            except Exception as e:
+                logger.debug(f"Could not get service botUserName: {e}")
+            
+            # Try to list integrations - if this succeeds, we have org permission
+            try:
+                organization.integrations.list()
+                return {
+                    'success': True,
+                    'hasOrgPermission': True,
+                    'orgId': org_id,
+                    'orgName': org_name or org_id,
+                    'currentIdentity': current_identity,
+                    'botUserName': bot_user_name,
+                    'message': None
+                }
+            except Exception as e:
+                logger.info(f"Org integration list failed (no org permission): {e}")
+                return {
+                    'success': True,
+                    'hasOrgPermission': False,
+                    'orgId': org_id,
+                    'orgName': org_name or org_id,
+                    'currentIdentity': current_identity,
+                    'botUserName': bot_user_name,
+                    'message': str(e)
+                }
+        except Exception as e:
+            logger.error(f"Error checking org access: {e}", exc_info=True)
+            return {
+                'success': False,
+                'hasOrgPermission': False,
+                'orgId': None,
+                'orgName': None,
+                'currentIdentity': None,
+                'botUserName': None,
+                'message': str(e)
+            }
+    
     def list_gcs_integrations(self, organization_id: str = None) -> dict:
         """
         List all GCS integrations in the organization.
@@ -1674,8 +1786,9 @@ class StressTestServer(dl.BaseServiceRunner):
             }
     
     def create_faas_proxy_driver(self, project_id: str = None, driver_name: str = None,
-                                 integration_id: str = None, bucket_name: str = None,
-                                 path: str = None, allow_external_delete: bool = True) -> dict:
+                                 integration_id: str = None, integration_type: str = None,
+                                 bucket_name: str = None, path: str = None, 
+                                 allow_external_delete: bool = True) -> dict:
         """
         Create a faasProxy storage driver.
         
@@ -1707,20 +1820,41 @@ class StressTestServer(dl.BaseServiceRunner):
             else:
                 organization = project.org
             
-            all_integrations = organization.integrations.list()
-            integration = None
+            # If integration_type is provided (manual mode), use it directly
+            # Otherwise, try to look up the integration to get its type
+            integration_id_val = integration_id
+            integration_type_obj = None
             
-            for int_obj in all_integrations:
-                int_id = int_obj.get('id') if isinstance(int_obj, dict) else getattr(int_obj, 'id', None)
-                if int_id == integration_id:
-                    integration = int_obj
-                    break
+            if integration_type:
+                # Use provided integration type (from manual input)
+                integration_type_obj = integration_type
+            else:
+                # Try to look up the integration to get its type
+                try:
+                    all_integrations = organization.integrations.list()
+                    integration = None
+                    
+                    for int_obj in all_integrations:
+                        int_id = int_obj.get('id') if isinstance(int_obj, dict) else getattr(int_obj, 'id', None)
+                        if int_id == integration_id:
+                            integration = int_obj
+                            break
+                    
+                    if integration:
+                        # Get integration type from the integration object
+                        if isinstance(integration, dict):
+                            integration_type_obj = integration.get('type')
+                        else:
+                            if hasattr(integration, 'type'):
+                                integration_type_obj = integration.type
+                            elif hasattr(integration, 'integrations_type'):
+                                integration_type_obj = integration.integrations_type
+                except Exception as e:
+                    logger.warning(f"Could not look up integration type: {e}, using default 'gcs'")
             
-            if integration is None:
-                return {
-                    'success': False,
-                    'error': f'Integration {integration_id} not found'
-                }
+            # Default to 'gcs' if we couldn't determine the type
+            if integration_type_obj is None:
+                integration_type_obj = 'gcs'
             
             # Check if driver already exists
             existing_drivers = self.list_faas_proxy_drivers(project_id=project_id)
@@ -1734,28 +1868,15 @@ class StressTestServer(dl.BaseServiceRunner):
                             'message': 'Driver already exists'
                         }
             
-            # Get integration type
-            integration_type = None
-            if isinstance(integration, dict):
-                integration_type = integration.get('type')
-                integration_id_val = integration.get('id')
-            else:
-                if hasattr(integration, 'type'):
-                    integration_type = integration.type
-                elif hasattr(integration, 'integrations_type'):
-                    integration_type = integration.integrations_type
-                integration_id_val = getattr(integration, 'id', None)
-            
-            if integration_type is None:
-                integration_type = dl.ExternalStorage.GCS
-            
             # Convert integration_type to string
-            if hasattr(integration_type, 'value'):
-                integration_type_str = integration_type.value
-            elif isinstance(integration_type, str):
-                integration_type_str = integration_type
+            if isinstance(integration_type_obj, str):
+                integration_type_str = integration_type_obj
+            elif hasattr(integration_type_obj, 'value'):
+                integration_type_str = integration_type_obj.value
+            elif integration_type_obj == dl.ExternalStorage.GCS:
+                integration_type_str = 'gcs'
             else:
-                integration_type_str = str(integration_type).lower()
+                integration_type_str = str(integration_type_obj).lower()
             
             # Get organization ID - handle both dict and SDK object
             if isinstance(organization, dict):

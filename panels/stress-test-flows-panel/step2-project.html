@@ -103,19 +103,41 @@
                 <p>• See Dataloop documentation: <a href="https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter" target="_blank">GCS Integration Guide</a></p>
                 <p>• <a href="https://docs.dataloop.ai/docs/cross-project-integration" target="_blank">Cross-Project Integration</a> (recommended), <a href="https://docs.dataloop.ai/docs/private-key-integration" target="_blank">Private Key Integration</a>, or <a href="https://docs.dataloop.ai/docs/workload-identity-federation" target="_blank">Workload Identity Federation</a></p>
             </div>
+        </div>
+
+        <div id="orgAccessChecking" class="card" style="text-align: center; padding: 32px;">
+            <div class="loading" style="margin: 0 auto 16px;"></div>
+            <p style="color: var(--text-secondary);">Checking organization access...</p>
+        </div>
+
+        <div id="noOrgPermissionSection" class="card" style="display: none;">
+            <h2>Organization permission required</h2>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                This service runs as a user or bot that does not have organization-level permission. 
+                To create integrations and drivers from this UI, add the service identity to your organization with the required permissions.
+            </p>
+            <div class="info-box" style="background: rgba(245, 158, 11, 0.1); border-color: var(--accent-warning);">
+                <p><strong>Organization</strong></p>
+                <p id="noPermOrgName" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; margin-top: 8px;">—</p>
+                <p id="noPermOrgId" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">—</p>
+                <p style="margin-top: 12px;"><strong>Service bot (add this to your org):</strong></p>
+                <p id="noPermBotUserName" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; margin-top: 4px; font-weight: 600;">—</p>
+                <p id="noPermIdentityFallback" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); margin-top: 4px; display: none;">—</p>
+                <p style="margin-top: 16px;">Add the service bot above to the organization with permissions to create integrations and storage drivers. Then refresh this page.</p>
+            </div>
             <div class="info-box" style="margin-top: 16px; background: rgba(16, 185, 129, 0.08); border-color: var(--accent-success);">
-                <p><strong>💡 Alternative: Use Scripts Locally</strong></p>
-                <p>You can also use the Python scripts locally on your machine:</p>
-                <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--bg-tertiary); padding: 8px; border-radius: 4px; margin-top: 8px;">
-                    # Check existing drivers<br>
-                    python check_faas_proxy_drivers.py --project-name "your-project"<br><br>
-                    # Create a new driver<br>
-                    python create_faas_proxy_driver.py
-                </p>
-                <p style="margin-top: 8px;">The scripts are available in the project root directory.</p>
+                <p><strong>Alternative: run the script locally</strong></p>
+                <p>If you cannot grant org permission to the service, download the project and run the script on your machine (with your own credentials):</p>
+                <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--bg-tertiary); padding: 10px; border-radius: 4px; margin-top: 8px; white-space: pre-wrap;"># Check existing drivers
+python check_faas_proxy_drivers.py --project-name "your-project"
+
+# Create a new driver (interactive)
+python create_faas_proxy_driver.py</p>
+                <p style="margin-top: 8px;">Scripts are in the project root: <code>create_faas_proxy_driver.py</code>, <code>check_faas_proxy_drivers.py</code></p>
             </div>
         </div>
 
+        <div id="driverSection" style="display: none;">
         <div class="card">
             <h2>Check Existing Drivers</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
@@ -170,10 +192,21 @@
                     <small>Select an existing GCS integration from the list above</small>
                 </div>
 
-                <div class="form-group" id="integrationManualGroup" style="display: none;">
-                    <label for="integrationIdManual">GCS Integration ID *</label>
-                    <input type="text" id="integrationIdManual" placeholder="e.g., ed2536b0-78de-4eb0-b79b-dc0cb864823b">
-                    <small>Enter your GCS integration ID (you can find it in the Dataloop platform or by running the script locally)</small>
+                <div id="integrationManualGroup" style="display: none;">
+                    <div class="form-group">
+                        <label for="integrationTypeManual">Integration Type *</label>
+                        <select id="integrationTypeManual" required>
+                            <option value="">Select integration type...</option>
+                            <option value="gcs">gcs</option>
+                            <option value="gcp-workload-identity-federation">gcp-workload-identity-federation</option>
+                        </select>
+                        <small>Select the type of GCS integration you're using</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="integrationIdManual">GCS Integration ID *</label>
+                        <input type="text" id="integrationIdManual" placeholder="e.g., ed2536b0-78de-4eb0-b79b-dc0cb864823b">
+                        <small>Enter your GCS integration ID (you can find it in the Dataloop platform or by running the script locally)</small>
+                    </div>
                 </div>
 
                 <div class="form-group">
@@ -199,6 +232,7 @@
             </form>
 
             <div id="driverResult" style="margin-top: 20px;"></div>
+        </div>
         </div>
 
         <div class="nav-buttons">
@@ -292,6 +326,7 @@
             const manualGroup = document.getElementById('integrationManualGroup');
             const selectField = document.getElementById('integrationId');
             const manualField = document.getElementById('integrationIdManual');
+            const manualTypeField = document.getElementById('integrationTypeManual');
             
             if (mode === 'manual') {
                 selectMode.style.display = 'none';
@@ -300,12 +335,14 @@
                 manualGroup.style.display = 'block';
                 selectField.removeAttribute('required');
                 manualField.setAttribute('required', 'required');
+                manualTypeField.setAttribute('required', 'required');
             } else {
                 selectMode.style.display = 'block';
                 manualMode.style.display = 'none';
                 selectGroup.style.display = 'block';
                 manualGroup.style.display = 'none';
                 manualField.removeAttribute('required');
+                manualTypeField.removeAttribute('required');
                 selectField.setAttribute('required', 'required');
             }
         }
@@ -328,22 +365,36 @@
             statusDiv.innerHTML = '';
             resultDiv.innerHTML = '';
             
-            // Get integration ID based on selected mode
+            // Get integration ID and type based on selected mode
             const mode = document.querySelector('input[name="integrationMode"]:checked').value;
-            const integrationId = mode === 'manual' 
-                ? document.getElementById('integrationIdManual').value.trim()
-                : document.getElementById('integrationId').value;
+            let integrationId, integrationType;
             
-            if (!integrationId) {
-                statusDiv.innerHTML = '<div class="status-message error">✗ Please provide a GCS Integration ID</div>';
-                createBtn.disabled = false;
-                createBtn.innerHTML = '🚀 Create faasProxy Driver';
-                return;
+            if (mode === 'manual') {
+                integrationId = document.getElementById('integrationIdManual').value.trim();
+                integrationType = document.getElementById('integrationTypeManual').value;
+                
+                if (!integrationId || !integrationType) {
+                    statusDiv.innerHTML = '<div class="status-message error">✗ Please provide both Integration Type and Integration ID</div>';
+                    createBtn.disabled = false;
+                    createBtn.innerHTML = '🚀 Create faasProxy Driver';
+                    return;
+                }
+            } else {
+                integrationId = document.getElementById('integrationId').value;
+                integrationType = null; // Will be determined from the selected integration
+                
+                if (!integrationId) {
+                    statusDiv.innerHTML = '<div class="status-message error">✗ Please select a GCS Integration</div>';
+                    createBtn.disabled = false;
+                    createBtn.innerHTML = '🚀 Create faasProxy Driver';
+                    return;
+                }
             }
             
             const formData = {
                 driverName: document.getElementById('driverName').value,
                 integrationId: integrationId,
+                integrationType: integrationType,
                 bucketName: document.getElementById('bucketName').value,
                 path: document.getElementById('path').value || null,
                 allowExternalDelete: document.getElementById('allowExternalDelete').checked
@@ -383,10 +434,56 @@
             }
         }
 
-        // Load integrations and drivers on page load
+        async function checkOrgAccess() {
+            const checkingEl = document.getElementById('orgAccessChecking');
+            const noPermEl = document.getElementById('noOrgPermissionSection');
+            const driverEl = document.getElementById('driverSection');
+            
+            try {
+                const response = await fetch('/api/org-access');
+                const data = await response.json();
+                
+                checkingEl.style.display = 'none';
+                
+                if (data.hasOrgPermission) {
+                    driverEl.style.display = 'block';
+                    loadIntegrations();
+                    loadDrivers();
+                } else {
+                    noPermEl.style.display = 'block';
+                    document.getElementById('noPermOrgName').textContent = data.orgName || '—';
+                    document.getElementById('noPermOrgId').textContent = data.orgId ? 'ID: ' + data.orgId : '—';
+                    var botUserName = data.botUserName || data.bot_user_name;
+                    var identityFallback = data.currentIdentity;
+                    var botEl = document.getElementById('noPermBotUserName');
+                    var fallbackEl = document.getElementById('noPermIdentityFallback');
+                    if (botUserName) {
+                        botEl.textContent = botUserName;
+                        botEl.style.display = 'block';
+                        fallbackEl.style.display = 'none';
+                    } else if (identityFallback) {
+                        botEl.textContent = identityFallback;
+                        botEl.style.display = 'block';
+                        fallbackEl.style.display = 'none';
+                    } else {
+                        botEl.textContent = 'Unknown (check service has botUserName set)';
+                        botEl.style.display = 'block';
+                        fallbackEl.style.display = 'none';
+                    }
+                }
+            } catch (error) {
+                checkingEl.style.display = 'none';
+                noPermEl.style.display = 'block';
+                document.getElementById('noPermOrgName').textContent = '—';
+                document.getElementById('noPermOrgId').textContent = 'Could not load org (check project is set)';
+                document.getElementById('noPermBotUserName').textContent = '—';
+                document.getElementById('noPermIdentityFallback').style.display = 'none';
+            }
+        }
+
+        // Check org access first, then show driver UI or no-permission message
         window.addEventListener('DOMContentLoaded', () => {
-            loadIntegrations();
-            loadDrivers();
+            checkOrgAccess();
         });
     </script>
 </body>
