@@ -58,7 +58,7 @@
     <div class="container" style="height: 100vh; overflow-y: scroll;">
         <div class="breadcrumb"><a href="index.html">Overview</a><span>›</span><span>Architecture</span></div>
         <h1>System Architecture</h1>
-        <p class="subtitle">Infrastructure diagram for nginx stress-test on GCP dev-env 2</p>
+        <p class="subtitle">Infrastructure diagram for nginx stress-test on Cloud dev-env 2</p>
 
         <div class="card">
             <h2>Request Flow Architecture</h2>
@@ -68,7 +68,7 @@
                     <div class="layer-content">
                         <div class="arch-box"><div class="icon">🌐</div><div class="label">Pipeline Execution</div></div>
                         <span class="arch-arrow">→</span>
-                        <div class="arch-box"><div class="icon">⚖️</div><div class="label">GCP Load Balancer</div></div>
+                        <div class="arch-box"><div class="icon">⚖️</div><div class="label">Cloud Load Balancer</div></div>
                     </div>
                 </div>
                 <div class="arch-arrow down">↓</div>
@@ -92,7 +92,7 @@
                     <div class="layer-label">Compute & Storage</div>
                     <div class="layer-content">
                         <div class="arch-box resnet"><div class="icon">🤖</div><div class="label">ResNet Function</div></div>
-                        <div class="arch-box storage"><div class="icon">📁</div><div class="label">GCP Storage</div></div>
+                        <div class="arch-box storage"><div class="icon">📁</div><div class="label">Cloud Storage</div></div>
                         <div class="arch-box"><div class="icon">🔗</div><div class="label">faasProxy Dataset</div></div>
                     </div>
                 </div>
@@ -141,7 +141,7 @@
                     </div>
                 </div>
                 <div class="component-card">
-                    <h3>📁 GCP Storage</h3>
+                    <h3>📁 Cloud Storage</h3>
                     <p>Network file storage for test images.</p>
                     <div class="specs">
                         <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">Storage</span></div>
@@ -164,7 +164,7 @@
                     <div class="specs">
                         <div class="spec-row"><span class="spec-label">Driver</span><span class="spec-value">faasProxy</span></div>
                         <div class="spec-row"><span class="spec-label">Items</span><span class="spec-value">LinkItem</span></div>
-                        <div class="spec-row"><span class="spec-label">Trigger</span><span class="spec-value">Pipeline</span></div>
+                        <div class="spec-row"><span class="spec-label">Execution</span><span class="spec-value">Batch execution command</span></div>
                     </div>
                 </div>
             </div>

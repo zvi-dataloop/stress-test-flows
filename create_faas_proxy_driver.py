@@ -171,8 +171,8 @@ def create_gcs_integration(organization: dl.Organization, integration_name: str,
     
     if use_cross_project:
         # Cross-project integration - requires IAM setup
-        print("\n  Using Cross-Project Integration (recommended for GCP)")
-        print("  Note: This requires IAM role setup in GCP. See documentation:")
+        print("\n  Using Cross-Project Integration (recommended for Cloud)")
+        print("  Note: This requires IAM role setup in Cloud. See documentation:")
         print("  https://docs.dataloop.ai/docs/cross-project-integration")
         
         bucket_name = get_user_input("  Enter GCS bucket name", required=True)
@@ -561,8 +561,8 @@ This script will help you create a faasProxy storage driver for your Dataloop pr
 
 The faasProxy driver is built as a layer above the GCS driver and is needed to
 store JSON files. It requires:
-1. A GCS integration (you can use an existing one or create a new one)
-2. A faasProxy storage driver that uses the GCS integration
+1. A GCS integration or Cloud Workload Identity Federation integration (you can use an existing one or create a new one)
+2. A faasProxy storage driver that uses the integration
 
 The script will:
 - List existing GCS integrations and let you select one, or
@@ -695,7 +695,7 @@ Let's get started!
     if integration is None:
         print("\n  Creating a new GCS integration...")
         print("  Choose integration method:")
-        print("  1. Cross-Project Integration (recommended for GCP, requires IAM setup)")
+        print("  1. Cross-Project Integration (recommended for Cloud, requires IAM setup)")
         print("  2. Private Key Integration (requires service account JSON key file)")
         
         integration_method = get_user_input("  Enter choice (1 or 2)", default="1")
