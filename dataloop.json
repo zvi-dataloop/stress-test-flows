@@ -10,7 +10,7 @@
   "codebase": {
     "type": "git",
     "gitUrl": "https://github.com/zvi-dataloop/stress-test-flows.git",
-    "gitTag": "1.0.36"
+    "gitTag": "1.0.37"
   },
   "description": "Stress test benchmark app with API to create datasets, pipelines, and execute batch tests",
   "components": {
