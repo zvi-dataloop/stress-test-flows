@@ -123,17 +123,17 @@
                 <p style="margin-top: 12px;"><strong>Service bot (add this to your org):</strong></p>
                 <p id="noPermBotUserName" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; margin-top: 4px; font-weight: 600;">—</p>
                 <p id="noPermIdentityFallback" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); margin-top: 4px; display: none;">—</p>
-                <p style="margin-top: 16px;">Add the service bot above to the organization with permissions to create integrations and storage drivers. Then refresh this page.</p>
+                <p style="margin-top: 16px;">Add the service bot above to the organization with permissions to create integrations and storage drivers. The bot must be set as <strong>admin</strong> on the org in order to get the permission to create the driver. <a id="orgMembersLink" href="#" target="_blank" rel="noopener noreferrer">Open org members</a> to add it. Then refresh this page.</p>
             </div>
             <div class="info-box" style="margin-top: 16px; background: rgba(16, 185, 129, 0.08); border-color: var(--accent-success);">
                 <p><strong>Alternative: run the script locally</strong></p>
-                <p>If you cannot grant org permission to the service, download the project and run the script on your machine (with your own credentials):</p>
+                <p>If you cannot grant org permission to the service, clone the project and run the script on your machine (with your own credentials):</p>
                 <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--bg-tertiary); padding: 10px; border-radius: 4px; margin-top: 8px; white-space: pre-wrap;"># Check existing drivers
 python check_faas_proxy_drivers.py --project-name "your-project"
 
 # Create a new driver (interactive)
 python create_faas_proxy_driver.py</p>
-                <p style="margin-top: 8px;">Scripts are in the project root: <code>create_faas_proxy_driver.py</code>, <code>check_faas_proxy_drivers.py</code></p>
+                <p style="margin-top: 8px;">Scripts on GitHub: <a href="https://github.com/zvi-dataloop/stress-test-flows/blob/main/create_faas_proxy_driver.py" target="_blank" rel="noopener noreferrer">create_faas_proxy_driver.py</a>, <a href="https://github.com/zvi-dataloop/stress-test-flows/blob/main/check_faas_proxy_drivers.py" target="_blank" rel="noopener noreferrer">check_faas_proxy_drivers.py</a></p>
             </div>
         </div>
 
@@ -453,6 +453,13 @@ python create_faas_proxy_driver.py</p>
                     noPermEl.style.display = 'block';
                     document.getElementById('noPermOrgName').textContent = data.orgName || '—';
                     document.getElementById('noPermOrgId').textContent = data.orgId ? 'ID: ' + data.orgId : '—';
+                    var orgMembersLink = document.getElementById('orgMembersLink');
+                    if (orgMembersLink && data.orgMembersUrl) {
+                        orgMembersLink.href = data.orgMembersUrl;
+                        orgMembersLink.style.display = 'inline';
+                    } else if (orgMembersLink) {
+                        orgMembersLink.style.display = 'none';
+                    }
                     var botUserName = data.botUserName || data.bot_user_name;
                     var identityFallback = data.currentIdentity;
                     var botEl = document.getElementById('noPermBotUserName');
@@ -478,6 +485,8 @@ python create_faas_proxy_driver.py</p>
                 document.getElementById('noPermOrgId').textContent = 'Could not load org (check project is set)';
                 document.getElementById('noPermBotUserName').textContent = '—';
                 document.getElementById('noPermIdentityFallback').style.display = 'none';
+                var orgMembersLink = document.getElementById('orgMembersLink');
+                if (orgMembersLink) orgMembersLink.style.display = 'none';
             }
         }
 

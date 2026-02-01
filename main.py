@@ -414,6 +414,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'hasOrgPermission': False,
                 'orgId': None,
                 'orgName': None,
+                'orgMembersUrl': None,
                 'currentIdentity': None,
                 'botUserName': None,
                 'message': str(e)
@@ -1604,12 +1605,21 @@ class StressTestServer(dl.BaseServiceRunner):
                     'hasOrgPermission': False,
                     'orgId': None,
                     'orgName': None,
+                    'orgMembersUrl': None,
                     'currentIdentity': None,
                     'botUserName': None,
                     'message': 'Could not get organization ID from project'
                 }
             if not org_name:
                 org_name = org_id
+
+            # Build org members URL for "add bot to org" link — use gate url from client_api with /api/v1 stripped
+            try:
+                env_url = (dl.client_api.environments[dl.client_api.environment].get('url') or '').strip()
+            except (KeyError, TypeError):
+                env_url = ''
+            base_url = env_url.replace('/api/v1', '').rstrip('/') if env_url else ''
+            org_members_url = f'{base_url or "https://console.dataloop.ai"}/iam/{org_id}/members'
 
             # Current identity (bot or user email) - project-level only
             current_identity = None
@@ -1739,6 +1749,7 @@ class StressTestServer(dl.BaseServiceRunner):
                     'hasOrgPermission': True,
                     'orgId': org_id,
                     'orgName': org_name or org_id,
+                    'orgMembersUrl': org_members_url,
                     'currentIdentity': current_identity,
                     'botUserName': bot_user_name,
                     'message': None
@@ -1750,6 +1761,7 @@ class StressTestServer(dl.BaseServiceRunner):
                     'hasOrgPermission': False,
                     'orgId': org_id,
                     'orgName': org_name or org_id,
+                    'orgMembersUrl': org_members_url,
                     'currentIdentity': current_identity,
                     'botUserName': bot_user_name,
                     'message': str(e)
@@ -1761,6 +1773,7 @@ class StressTestServer(dl.BaseServiceRunner):
                 'hasOrgPermission': False,
                 'orgId': None,
                 'orgName': None,
+                'orgMembersUrl': None,
                 'currentIdentity': None,
                 'botUserName': None,
                 'message': str(e)
