@@ -76,13 +76,13 @@
 
         <div class="info-box">
             <h4>What are Link Items?</h4>
-            <p>Link items reference files stored in external storage (Filestore) without copying them. This allows the faasProxy dataset to track images for pipeline execution while keeping data in place.</p>
+            <p>Link items reference files stored in external storage without copying them. This allows the faasProxy dataset to track images for pipeline execution while keeping data in place.</p>
         </div>
 
         <div class="card">
             <h2>Link Item Flow</h2>
             <div class="link-flow">
-                <div class="flow-box"><div class="icon">📁</div><div class="label">Filestore Images</div></div>
+                <div class="flow-box"><div class="icon">📁</div><div class="label">Storage Images</div></div>
                 <span class="flow-arrow">→</span>
                 <div class="flow-box highlight"><div class="icon">🔗</div><div class="label">Create LinkItem</div></div>
                 <span class="flow-arrow">→</span>
@@ -93,7 +93,7 @@
         <div class="card">
             <h2>Create Link Items</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Link items are created automatically by the stress-test application when you run the full workflow. Each image downloaded to Filestore will have a corresponding link item created in the faasProxy dataset.
+                Link items are created automatically by the stress-test application when you run the full workflow. Each image downloaded to Storage will have a corresponding link item created in the faasProxy dataset.
             </p>
         </div>
 

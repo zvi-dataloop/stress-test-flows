@@ -92,7 +92,7 @@
                     <div class="layer-label">Compute & Storage</div>
                     <div class="layer-content">
                         <div class="arch-box resnet"><div class="icon">🤖</div><div class="label">ResNet Function</div></div>
-                        <div class="arch-box storage"><div class="icon">📁</div><div class="label">GCP Filestore</div></div>
+                        <div class="arch-box storage"><div class="icon">📁</div><div class="label">GCP Storage</div></div>
                         <div class="arch-box"><div class="icon">🔗</div><div class="label">faasProxy Dataset</div></div>
                     </div>
                 </div>
@@ -141,11 +141,11 @@
                     </div>
                 </div>
                 <div class="component-card">
-                    <h3>📁 GCP Filestore</h3>
+                    <h3>📁 GCP Storage</h3>
                     <p>Network file storage for test images.</p>
                     <div class="specs">
-                        <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">Filestore</span></div>
-                        <div class="spec-row"><span class="spec-label">Mount</span><span class="spec-value">/mnt/filestore</span></div>
+                        <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">Storage</span></div>
+                        <div class="spec-row"><span class="spec-label">Mount</span><span class="spec-value">/mnt/storage</span></div>
                         <div class="spec-row"><span class="spec-label">Access</span><span class="spec-value">via LinkItem</span></div>
                     </div>
                 </div>
@@ -160,7 +160,7 @@
                 </div>
                 <div class="component-card">
                     <h3>🔗 faasProxy Dataset</h3>
-                    <p>Dataset with LinkItems referencing Filestore images.</p>
+                    <p>Dataset with LinkItems referencing Storage images.</p>
                     <div class="specs">
                         <div class="spec-row"><span class="spec-label">Driver</span><span class="spec-value">faasProxy</span></div>
                         <div class="spec-row"><span class="spec-label">Items</span><span class="spec-value">LinkItem</span></div>

@@ -133,7 +133,7 @@ If you prefer to set up manually:
 The faasProxy driver is specifically needed because:
 - It's built as a layer above the GCS driver
 - It enables storing JSON files in the dataset
-- It allows datasets to reference files stored in FaaS Filestore without copying them (using link items)
+- It allows datasets to reference files stored in FaaS Storage without copying them (using link items)
 - It's required for the stress test workflow to function properly
 
 ## Deployment
