@@ -52,7 +52,7 @@ The script will:
 - `gcs` - Standard GCS integration
 - `gcp-workload-identity-federation` - Workload Identity Federation integration
 
-1. **GCS Integration**: You can use an existing GCS integration or create a new one
+1. **GCS or Cloud Workload Identity Federation Integration**: You can use an existing GCS integration, Cloud Workload Identity Federation integration, or create a new one
    - The script will list existing GCS integrations and let you select one
    - Supported integration types: `gcs`, `gcp-workload-identity-federation`
    - To create a new one, see Dataloop documentation: [GCS Integration Guide](https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter)
@@ -90,16 +90,16 @@ python create_faas_proxy_driver.py
 
 **Note:** If `DTLPY_ENV` is not set, the scripts will default to `prod` and prompt you to confirm or change it during execution.
 
-### Step 1: Create GCS Integration
+### Step 1: Create GCS or Cloud Workload Identity Federation Integration
 
-First, create a GCS integration in your Dataloop organization. Supported integration types:
+First, create a GCS integration or Cloud Workload Identity Federation integration in your Dataloop organization. Supported integration types:
 - `gcs` - Standard GCS integration
 - `gcp-workload-identity-federation` - Workload Identity Federation integration
 
 See the Dataloop documentation for detailed instructions:
 
 - **GCS Integration Guide**: https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter
-- **Cross-Project Integration** (recommended for GCP): https://docs.dataloop.ai/docs/cross-project-integration
+- **Cross-Project Integration** (recommended for Cloud): https://docs.dataloop.ai/docs/cross-project-integration
 - **Private Key Integration**: https://docs.dataloop.ai/docs/private-key-integration
 - **Workload Identity Federation**: https://docs.dataloop.ai/docs/workload-identity-federation
 
