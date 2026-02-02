@@ -617,7 +617,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "datasetId": "...",  # or "dataset_id" (optional)
             "projectId": "...",  # or "project_id" (optional, auto-detected from service if not provided)
             "datasetName": "...",  # or "dataset_name" (optional, used if createDataset=true)
-            "driverId": "...",  # or "driver_id" (optional, default: "rubiks_internal_faas_proxy_driver")
+            "driverId": "...",  # or "driver_id" (mandatory)
             "pipelineName": "...",  # or "pipeline_name" (optional)
             "numWorkers": 50,  # or "num_workers"
             "pipelineConcurrency": 30,  # or "pipeline_concurrency" - concurrent executions per pod (default: 30)
@@ -644,7 +644,10 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             dataset_id_param = data.get('datasetId') or data.get('dataset_id')
             project_id_param = project_id
             dataset_name = data.get('datasetName') or data.get('dataset_name')
-            driver_id = data.get('driverId') or data.get('driver_id') or 'rubiks_internal_faas_proxy_driver'
+            driver_id = (data.get('driverId') or data.get('driver_id') or '').strip()
+            if not driver_id:
+                self._send_error(400, 'driverId is mandatory')
+                return
             pipeline_name = data.get('pipelineName') or data.get('pipeline_name', 'stress-test-resnet-v11')
             num_workers = data.get('numWorkers') or data.get('num_workers', 50)
             pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 30)
@@ -1454,7 +1457,7 @@ class StressTestServer(dl.BaseServiceRunner):
         Args:
             project_id: Project ID (if None, uses project from default_dataset_id)
             dataset_name: Dataset name (default: 'stress-test-dataset-{date}')
-            driver_id: Driver ID for the dataset (default: 'rubiks_internal_faas_proxy_driver')
+            driver_id: Driver ID for the dataset (mandatory)
         
         Returns:
             dict with dataset info
@@ -1462,9 +1465,10 @@ class StressTestServer(dl.BaseServiceRunner):
         if dataset_name is None:
             dataset_name = f'stress-test-dataset-{self.date_str}'
         
-        if driver_id is None:
-            driver_id = 'rubiks_internal_faas_proxy_driver'
+        if not driver_id or (isinstance(driver_id, str) and not driver_id.strip()):
+            return {'error': 'driver_id is mandatory'}
         
+        driver_id = driver_id.strip() if isinstance(driver_id, str) else driver_id
         logger.info(f"Creating dataset: {dataset_name} with driver_id: {driver_id}")
         
         # Get project
@@ -2041,10 +2045,32 @@ class StressTestServer(dl.BaseServiceRunner):
             )
             
             if not success:
-                error_msg = response if isinstance(response, str) else str(response)
+                # Extract error from /drivers API response (may be dict with error, message, errors, etc.)
+                error_msg = response
+                if isinstance(response, dict):
+                    err_list = response.get('errors')
+                    if isinstance(err_list, list) and err_list:
+                        parts = []
+                        for e in err_list:
+                            if isinstance(e, str):
+                                parts.append(e)
+                            elif isinstance(e, dict):
+                                parts.append(e.get('message') or e.get('error') or str(e))
+                            else:
+                                parts.append(str(e))
+                        error_msg = ', '.join(parts)
+                    else:
+                        error_msg = (
+                            response.get('error') or
+                            response.get('message') or
+                            (str(err_list) if err_list is not None else None) or
+                            str(response)
+                        )
+                else:
+                    error_msg = str(response) if response else 'Unknown error'
                 return {
                     'success': False,
-                    'error': f'Failed to create driver: {error_msg}'
+                    'error': error_msg if isinstance(error_msg, str) else str(error_msg)
                 }
             
             # Parse response
@@ -2078,9 +2104,19 @@ class StressTestServer(dl.BaseServiceRunner):
             }
         except Exception as e:
             logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
+            err_msg = str(e)
+            if hasattr(e, 'response') and getattr(e, 'response', None) is not None:
+                try:
+                    r = e.response
+                    if hasattr(r, 'json') and callable(r.json):
+                        body = r.json()
+                        if isinstance(body, dict):
+                            err_msg = body.get('error') or body.get('message') or err_msg
+                except Exception:
+                    pass
             return {
                 'success': False,
-                'error': str(e)
+                'error': err_msg
             }
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None) -> dict:
@@ -4030,7 +4066,7 @@ class ServiceRunner:
                        If dataset already has items, download and link_items steps will be auto-skipped.
             project_id: Project ID (required if creating dataset and default_dataset_id doesn't exist)
             dataset_name: Dataset name (used if creating dataset)
-            driver_id: Driver ID for dataset creation (default: 'rubiks_internal_faas_proxy_driver')
+            driver_id: Driver ID for dataset creation (mandatory)
             pipeline_name: Name for the pipeline
             num_workers: Number of parallel download workers
             coco_dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)

@@ -158,9 +158,9 @@
                     <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Leave empty to automatically create dataset</small>
                 </div>
                 <div class="form-group">
-                    <label>Driver ID</label>
-                    <input type="text" id="driverId" value="rubiks_internal_faas_proxy_driver" placeholder="Driver ID">
-                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Used when creating dataset</small>
+                    <label>Driver ID <span style="color: var(--accent-warning);">*</span></label>
+                    <input type="text" id="driverId" value="" placeholder="Driver ID (mandatory)">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Mandatory. Used when creating dataset. Create one in Step 2 if needed.</small>
                 </div>
                 <div class="form-group">
                     <label>Link Base URL</label>
@@ -654,7 +654,7 @@
             const config = {
                 maxImages: parseInt(document.getElementById('maxImages').value),
                 datasetId: document.getElementById('datasetId').value,
-                driverId: document.getElementById('driverId').value,
+                driverId: (document.getElementById('driverId').value || '').trim(),
                 linkBaseUrl: document.getElementById('linkBaseUrl').value,
                 pipelineName: document.getElementById('pipelineName').value,
                 // Project ID is optional - will be auto-detected from service
@@ -662,6 +662,15 @@
                 pipelineConcurrency: parseInt(document.getElementById('pipelineConcurrency').value),
                 pipelineMaxReplicas: parseInt(document.getElementById('pipelineMaxReplicas').value)
             };
+
+            if (!config.driverId) {
+                addLog('Driver ID is mandatory.', 'error');
+                updateStatus('error', 'Failed');
+                isRunning = false;
+                runBtn.disabled = false;
+                runBtn.textContent = '🚀 Run Full Workflow';
+                return;
+            }
 
             try {
                 // Use the /api/run-full endpoint which handles all steps including dataset creation
@@ -674,13 +683,17 @@
                     body: JSON.stringify(config)
                 });
 
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                const resultText = await response.text();
+                let result = {};
+                try {
+                    result = JSON.parse(resultText);
+                } catch (_) {
+                    result = { error: resultText || `HTTP ${response.status}` };
                 }
-
-                const result = await response.json();
-                
+                if (!response.ok) {
+                    const errMsg = result.error || result.message || resultText || `HTTP ${response.status}`;
+                    throw new Error(errMsg);
+                }
                 if (result.error) {
                     throw new Error(result.error);
                 }
