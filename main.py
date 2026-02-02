@@ -2045,20 +2045,27 @@ class StressTestServer(dl.BaseServiceRunner):
             )
             
             if not success:
-                # Normalize response to dict (SDK may return response object or string)
+                # Normalize response to dict (SDK may return response object with .text, .json(), or string)
                 resp_dict = None
                 if isinstance(response, dict):
                     resp_dict = response
-                elif hasattr(response, 'json') and callable(getattr(response, 'json')):
-                    try:
-                        resp_dict = response.json() if callable(response.json) else None
-                    except Exception:
-                        pass
-                elif isinstance(response, str) and response.strip():
-                    try:
-                        resp_dict = json.loads(response)
-                    except Exception:
-                        resp_dict = {'message': response}
+                elif response is not None:
+                    if hasattr(response, 'text') and getattr(response, 'text', None):
+                        try:
+                            resp_dict = json.loads(response.text)
+                        except Exception:
+                            if response.text:
+                                resp_dict = {'message': response.text}
+                    if not isinstance(resp_dict, dict) and hasattr(response, 'json') and callable(getattr(response, 'json')):
+                        try:
+                            resp_dict = response.json() if callable(response.json) else None
+                        except Exception:
+                            pass
+                    if not isinstance(resp_dict, dict) and isinstance(response, str) and response.strip():
+                        try:
+                            resp_dict = json.loads(response)
+                        except Exception:
+                            resp_dict = {'message': response}
                 if not isinstance(resp_dict, dict):
                     resp_dict = {}
                 # Extract error from /drivers API (message, error, errors, etc.)
@@ -2119,7 +2126,7 @@ class StressTestServer(dl.BaseServiceRunner):
         except Exception as e:
             logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
             err_msg = str(e)
-            # Try to extract API error from exception (response body, args, or str(e) as JSON)
+            # Try to extract API error from exception (response body, args, or str(e))
             try:
                 if hasattr(e, 'response') and getattr(e, 'response', None) is not None:
                     r = e.response
@@ -2127,6 +2134,13 @@ class StressTestServer(dl.BaseServiceRunner):
                         body = r.json()
                         if isinstance(body, dict):
                             err_msg = body.get('error') or body.get('message') or err_msg
+                    if err_msg == str(e) and hasattr(r, 'text') and r.text:
+                        try:
+                            body = json.loads(r.text)
+                            if isinstance(body, dict):
+                                err_msg = body.get('error') or body.get('message') or err_msg
+                        except Exception:
+                            pass
                 if err_msg == str(e) and getattr(e, 'args', None) and len(e.args) > 0:
                     first = e.args[0]
                     if isinstance(first, dict):
@@ -2138,6 +2152,56 @@ class StressTestServer(dl.BaseServiceRunner):
                                 err_msg = parsed.get('error') or parsed.get('message') or err_msg
                         except Exception:
                             pass
+                # Dataloop SDK embeds API response in exception: [Response <404>][Reason: Not Found][Text: {"message":"...",...}]
+                if err_msg == str(e):
+                    s = str(e)
+                    # Find JSON after "Text: " (may be object or array with one object)
+                    text_prefix = 'Text: '
+                    idx = s.find(text_prefix)
+                    if idx >= 0:
+                        rest = s[idx + len(text_prefix):].strip()
+                        start = rest.find('{')
+                        if start >= 0:
+                            depth = 0
+                            end = -1
+                            for i, c in enumerate(rest[start:], start=start):
+                                if c == '{':
+                                    depth += 1
+                                elif c == '}':
+                                    depth -= 1
+                                    if depth == 0:
+                                        end = i
+                                        break
+                            if end >= 0:
+                                try:
+                                    parsed = json.loads(rest[start:end + 1])
+                                    if isinstance(parsed, dict):
+                                        err_msg = parsed.get('error') or parsed.get('message') or err_msg
+                                    elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                                        err_msg = parsed[0].get('error') or parsed[0].get('message') or err_msg
+                                except Exception:
+                                    pass
+                # Fallback: extract "message":"...\" value from exception string (handles nested JSON)
+                if err_msg == str(e):
+                    s = str(e)
+                    key = '"message":"'
+                    idx = s.find(key)
+                    if idx >= 0:
+                        start = idx + len(key)
+                        i = start
+                        end = start
+                        while i < len(s):
+                            if s[i] == '\\' and i + 1 < len(s):
+                                i += 2
+                                continue
+                            if s[i] == '"':
+                                end = i
+                                break
+                            i += 1
+                        if end > start:
+                            extracted = s[start:end].replace('\\"', '"').replace('\\n', '\n').strip()
+                            if extracted:
+                                err_msg = extracted
                 if err_msg == str(e) and str(e).strip().startswith('{'):
                     try:
                         parsed = json.loads(str(e))
