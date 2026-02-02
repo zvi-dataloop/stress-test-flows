@@ -2036,39 +2036,26 @@ class StressTestServer(dl.BaseServiceRunner):
             if path:
                 payload["payload"]["path"] = path
             
-            # Create driver using direct API call
-            url = f"/drivers"
-            success, response = project._client_api.gen_request(
-                req_type='post',
-                path=url,
-                json_req=payload
-            )
-            
-            if not success:
-                # Normalize response to dict (SDK may return response object with .text, .json(), or string)
-                resp_dict = None
-                if isinstance(response, dict):
-                    resp_dict = response
-                elif response is not None:
-                    if hasattr(response, 'text') and getattr(response, 'text', None):
-                        try:
-                            resp_dict = json.loads(response.text)
-                        except Exception:
-                            if response.text:
-                                resp_dict = {'message': response.text}
-                    if not isinstance(resp_dict, dict) and hasattr(response, 'json') and callable(getattr(response, 'json')):
-                        try:
-                            resp_dict = response.json() if callable(response.json) else None
-                        except Exception:
-                            pass
-                    if not isinstance(resp_dict, dict) and isinstance(response, str) and response.strip():
-                        try:
-                            resp_dict = json.loads(response)
-                        except Exception:
-                            resp_dict = {'message': response}
-                if not isinstance(resp_dict, dict):
-                    resp_dict = {}
-                # Extract error from /drivers API (message, error, errors, etc.)
+            # Create driver using direct API call (requests.post so we always get response body on error)
+            base_url = (dl.environment() or '').strip().rstrip('/')
+            if not base_url:
+                try:
+                    base_url = dl.client_api.environment
+                except (KeyError, TypeError):
+                    pass
+            api_url = f"{base_url}/drivers" if base_url else None
+            if not api_url or not api_url.startswith('http'):
+                return {'success': False, 'error': 'Could not determine API base URL', 'message': 'Could not determine API base URL'}
+            headers = {'Authorization': f'Bearer {dl.token()}', 'Content-Type': 'application/json'}
+            resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
+            if not resp.ok:
+                # Always have response body from requests
+                resp_dict = {}
+                try:
+                    resp_dict = resp.json()
+                except Exception:
+                    if resp.text:
+                        resp_dict = {'message': resp.text}
                 err_list = resp_dict.get('errors')
                 if isinstance(err_list, list) and err_list:
                     parts = []
@@ -2079,28 +2066,24 @@ class StressTestServer(dl.BaseServiceRunner):
                             parts.append(e.get('message') or e.get('error') or str(e))
                         else:
                             parts.append(str(e))
-                    error_msg = ', '.join(parts)
+                    error_str = ', '.join(parts)
                 else:
-                    error_msg = (
+                    error_str = (
                         resp_dict.get('error') or
                         resp_dict.get('message') or
                         (str(err_list) if err_list is not None else None) or
-                        str(response) if response else 'Unknown error'
+                        resp.text or f'HTTP {resp.status_code}'
                     )
-                error_str = error_msg if isinstance(error_msg, str) else str(error_msg)
+                error_str = error_str if isinstance(error_str, str) else str(error_str)
                 return {
                     'success': False,
                     'error': error_str,
                     'message': error_str
                 }
-            
-            # Parse response
-            if isinstance(response, dict):
-                driver_data = response
-            elif hasattr(response, 'json'):
-                driver_data = response.json()
-            else:
-                driver_data = response
+            try:
+                driver_data = resp.json()
+            except Exception:
+                driver_data = {}
             
             driver_id = driver_data.get('id') or driver_data.get('driverId')
             driver_name_result = driver_data.get('name', driver_name)
