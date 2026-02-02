@@ -424,7 +424,8 @@ python create_faas_proxy_driver.py</p>
                     // Reload drivers list
                     loadDrivers();
                 } else {
-                    statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${data.error || 'Unknown error'}</div>`;
+                    const errText = (data.error || data.message || 'Unknown error').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+                    statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${errText}</div>`;
                 }
             } catch (error) {
                 statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${error.message}</div>`;

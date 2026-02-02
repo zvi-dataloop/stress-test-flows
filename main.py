@@ -2045,32 +2045,46 @@ class StressTestServer(dl.BaseServiceRunner):
             )
             
             if not success:
-                # Extract error from /drivers API response (may be dict with error, message, errors, etc.)
-                error_msg = response
+                # Normalize response to dict (SDK may return response object or string)
+                resp_dict = None
                 if isinstance(response, dict):
-                    err_list = response.get('errors')
-                    if isinstance(err_list, list) and err_list:
-                        parts = []
-                        for e in err_list:
-                            if isinstance(e, str):
-                                parts.append(e)
-                            elif isinstance(e, dict):
-                                parts.append(e.get('message') or e.get('error') or str(e))
-                            else:
-                                parts.append(str(e))
-                        error_msg = ', '.join(parts)
-                    else:
-                        error_msg = (
-                            response.get('error') or
-                            response.get('message') or
-                            (str(err_list) if err_list is not None else None) or
-                            str(response)
-                        )
+                    resp_dict = response
+                elif hasattr(response, 'json') and callable(getattr(response, 'json')):
+                    try:
+                        resp_dict = response.json() if callable(response.json) else None
+                    except Exception:
+                        pass
+                elif isinstance(response, str) and response.strip():
+                    try:
+                        resp_dict = json.loads(response)
+                    except Exception:
+                        resp_dict = {'message': response}
+                if not isinstance(resp_dict, dict):
+                    resp_dict = {}
+                # Extract error from /drivers API (message, error, errors, etc.)
+                err_list = resp_dict.get('errors')
+                if isinstance(err_list, list) and err_list:
+                    parts = []
+                    for e in err_list:
+                        if isinstance(e, str):
+                            parts.append(e)
+                        elif isinstance(e, dict):
+                            parts.append(e.get('message') or e.get('error') or str(e))
+                        else:
+                            parts.append(str(e))
+                    error_msg = ', '.join(parts)
                 else:
-                    error_msg = str(response) if response else 'Unknown error'
+                    error_msg = (
+                        resp_dict.get('error') or
+                        resp_dict.get('message') or
+                        (str(err_list) if err_list is not None else None) or
+                        str(response) if response else 'Unknown error'
+                    )
+                error_str = error_msg if isinstance(error_msg, str) else str(error_msg)
                 return {
                     'success': False,
-                    'error': error_msg if isinstance(error_msg, str) else str(error_msg)
+                    'error': error_str,
+                    'message': error_str
                 }
             
             # Parse response
@@ -2105,18 +2119,38 @@ class StressTestServer(dl.BaseServiceRunner):
         except Exception as e:
             logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
             err_msg = str(e)
-            if hasattr(e, 'response') and getattr(e, 'response', None) is not None:
-                try:
+            # Try to extract API error from exception (response body, args, or str(e) as JSON)
+            try:
+                if hasattr(e, 'response') and getattr(e, 'response', None) is not None:
                     r = e.response
-                    if hasattr(r, 'json') and callable(r.json):
+                    if hasattr(r, 'json') and callable(getattr(r, 'json')):
                         body = r.json()
                         if isinstance(body, dict):
                             err_msg = body.get('error') or body.get('message') or err_msg
-                except Exception:
-                    pass
+                if err_msg == str(e) and getattr(e, 'args', None) and len(e.args) > 0:
+                    first = e.args[0]
+                    if isinstance(first, dict):
+                        err_msg = first.get('error') or first.get('message') or err_msg
+                    elif isinstance(first, str) and first.strip().startswith('{'):
+                        try:
+                            parsed = json.loads(first)
+                            if isinstance(parsed, dict):
+                                err_msg = parsed.get('error') or parsed.get('message') or err_msg
+                        except Exception:
+                            pass
+                if err_msg == str(e) and str(e).strip().startswith('{'):
+                    try:
+                        parsed = json.loads(str(e))
+                        if isinstance(parsed, dict):
+                            err_msg = parsed.get('error') or parsed.get('message') or err_msg
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             return {
                 'success': False,
-                'error': err_msg
+                'error': err_msg,
+                'message': err_msg
             }
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None) -> dict:
