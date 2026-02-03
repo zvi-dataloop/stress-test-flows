@@ -427,6 +427,29 @@
             document.getElementById('logCount').textContent = `(${count} entries)`;
         }
         
+        // Replace log container with server logs (used when backend trims and we need to resync)
+        function replaceLogsWith(logs) {
+            const container = document.getElementById('logContainer');
+            if (!container) return;
+            container.innerHTML = '';
+            batchProgressLine = null;
+            (logs || []).forEach(log => {
+                const level = log.level?.toLowerCase() || 'info';
+                const step = log.step || null;
+                const message = log.message || '';
+                const entry = document.createElement('div');
+                entry.className = `log-entry ${level}`;
+                const timestamp = new Date().toLocaleTimeString();
+                let html = `<span class="log-timestamp">[${timestamp}]</span>`;
+                if (step) html += `<span class="log-step">[${step}]</span>`;
+                entry.innerHTML = html + message;
+                container.appendChild(entry);
+            });
+            container.scrollTop = container.scrollHeight;
+            const countEl = document.getElementById('logCount');
+            if (countEl) countEl.textContent = `(${logs.length} entries)`;
+        }
+        
         function updateBatchProgressLog(message, level = 'info', step = null) {
             const container = document.getElementById('logContainer');
             const timestamp = new Date().toLocaleTimeString();
@@ -823,9 +846,14 @@
                     }
                     
                     // Add new logs (only new ones since last poll)
-                    // Special handling for batch execution progress - update in place
+                    // When backend trims to 1800, length stays same so we resync to get latest logs
                     const logs = progress.logs || [];
-                    if (logs.length > lastLogCount) {
+                    const LOG_TRIM_SIZE = 1800; // Must match backend limit (~1–1.5 MB)
+                    if (logs.length === lastLogCount && lastLogCount >= LOG_TRIM_SIZE) {
+                        // At trim size and count unchanged - backend likely trimmed; replace with server's latest
+                        replaceLogsWith(logs);
+                        lastLogCount = logs.length;
+                    } else if (logs.length > lastLogCount) {
                         const newLogs = logs.slice(lastLogCount);
                         newLogs.forEach(log => {
                             const level = log.level?.toLowerCase() || 'info';

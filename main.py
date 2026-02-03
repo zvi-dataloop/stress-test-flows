@@ -764,9 +764,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     'message': message
                 })
                 
-                # Limit logs to last 100 entries to prevent memory issues
-                if len(progress['logs']) > 100:
-                    progress['logs'] = progress['logs'][-100:]
+                # Limit logs to last 1800 entries (~1–1.5 MB); frontend resyncs when trimmed
+                if len(progress['logs']) > 1800:
+                    progress['logs'] = progress['logs'][-1800:]
                 
                 if result:
                     progress['result'] = result
@@ -2425,21 +2425,16 @@ class StressTestServer(dl.BaseServiceRunner):
                     }
                 }
                 
-                # Write to temporary JSON file (use unique path per thread)
+                # Upload from in-memory buffer (no temp file)
                 json_filename = f"{os.path.splitext(filename)[0]}.json"
-                temp_json_path = f"/tmp/{threading.current_thread().ident}_{json_filename}"
-                with open(temp_json_path, 'w') as f:
-                    json.dump(link_item_content, f)
-                
-                # Upload the JSON file to dataset
+                json_bytes = json.dumps(link_item_content).encode('utf-8')
+                buffer = io.BytesIO(json_bytes)
                 item = dataset.items.upload(
-                    local_path=temp_json_path,
+                    local_path=buffer,
                     remote_path=f'/stress-test/{self.date_str}',
+                    remote_name=json_filename,
                     overwrite=False
                 )
-                
-                # Clean up temp file
-                os.remove(temp_json_path)
                 
                 return {'success': True, 'filename': json_filename, 'item_id': item.id, 'link_url': link_url}
                 
