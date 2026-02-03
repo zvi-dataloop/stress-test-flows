@@ -98,14 +98,14 @@ The script will guide you through:
 
 ### Prerequisites for GCS Integration
 
-Before creating the faasProxy driver, you need to create a GCS integration in your Dataloop organization. Supported integration types:
+Before creating the faasProxy driver, you need a GCS integration or Cloud Workload Identity Federation integration in your Dataloop organization. Supported integration types:
 - `gcs` - Standard GCS integration
 - `gcp-workload-identity-federation` - Workload Identity Federation integration
 
 See the Dataloop documentation for detailed instructions:
 
 - **GCS Integration Guide**: https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter
-- **Cross-Project Integration** (recommended for GCP): https://docs.dataloop.ai/docs/cross-project-integration
+- **Cross-Project Integration** (recommended for Cloud): https://docs.dataloop.ai/docs/cross-project-integration
 - **Private Key Integration**: https://docs.dataloop.ai/docs/private-key-integration
 - **Workload Identity Federation**: https://docs.dataloop.ai/docs/workload-identity-federation
 
