@@ -2200,7 +2200,8 @@ class StressTestServer(dl.BaseServiceRunner):
                 'message': err_msg
             }
     
-    def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None) -> dict:
+    def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None,
+                        create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None) -> dict:
         """
         Download images from COCO to NFS storage.
         
@@ -2209,6 +2210,10 @@ class StressTestServer(dl.BaseServiceRunner):
             max_images: Maximum number of images to download (default: 50000)
             num_workers: Number of parallel download workers (default: 50)
             dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
+            create_link_on_download: If True (default), create link item in dataset as soon as each image is downloaded (faster). Set False to only download; pass dataset_id and link_base_url when True.
+            dataset_id: Required when create_link_on_download=True; dataset to add link items to.
+            link_base_url: Required when create_link_on_download=True; base URL for link items.
+            project_id: Required when create_link_on_download=True for dataset access.
         
         Returns:
             dict with download results
@@ -2223,6 +2228,25 @@ class StressTestServer(dl.BaseServiceRunner):
         total_images = len(image_urls)
         logger.info(f"Starting download of {total_images} images to {self.storage_path}")
         logger.info(f"Using {num_workers} parallel workers")
+        if create_link_on_download:
+            logger.info("Create-link-on-download enabled: will create link item immediately after each download")
+        
+        # Resolve dataset and link_base_url when create_link_on_download
+        link_dataset = None
+        link_base_url_full = None
+        if create_link_on_download and dataset_id and link_base_url:
+            link_base_url_full = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
+            try:
+                pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+                if pid:
+                    project = dl.projects.get(project_id=pid)
+                    link_dataset = project.datasets.get(dataset_id=dataset_id)
+                else:
+                    link_dataset = dl.datasets.get(dataset_id=dataset_id)
+            except Exception as e:
+                logger.warning(f"Could not get dataset for create_link_on_download: {e}; will create link items in batch later")
+                link_dataset = None
+                link_base_url_full = None
         
         # Create directory
         os.makedirs(self.storage_path, exist_ok=True)
@@ -2245,6 +2269,13 @@ class StressTestServer(dl.BaseServiceRunner):
                 
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
+                
+                # Create link item immediately after download when enabled (saves a separate pass)
+                if link_dataset is not None and link_base_url_full:
+                    try:
+                        self._upload_one_link_item(link_dataset, filename, link_base_url_full)
+                    except Exception as link_err:
+                        logger.warning(f"Create link on download failed for {filename}: {link_err}")
                 
                 return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
             except Exception as e:
@@ -2293,6 +2324,37 @@ class StressTestServer(dl.BaseServiceRunner):
             'actual_files_on_disk': len(actual_files),
             'files': actual_files
         }
+    
+    def _upload_one_link_item(self, dataset, filename: str, link_base_url_full: str):
+        """
+        Create and upload one link item (JSON) to the dataset from an in-memory buffer.
+        Used by create_link_items and by download_images when create_link_on_download=True.
+        """
+        ext = filename.lower().split('.')[-1]
+        mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
+        link_url = f"{link_base_url_full}/{filename}"
+        link_item_content = {
+            "type": "link",
+            "shebang": "dataloop",
+            "metadata": {
+                "dltype": "link",
+                "linkInfo": {
+                    "type": "url",
+                    "ref": link_url,
+                    "mimetype": mimetype
+                }
+            }
+        }
+        json_filename = f"{os.path.splitext(filename)[0]}.json"
+        json_bytes = json.dumps(link_item_content).encode('utf-8')
+        buffer = io.BytesIO(json_bytes)
+        item = dataset.items.upload(
+            local_path=buffer,
+            remote_path=f'/stress-test/{self.date_str}',
+            remote_name=json_filename,
+            overwrite=False
+        )
+        return item
     
     def create_link_items(self, dataset_id: str = None, filenames: list = None, num_workers: int = 20, progress_callback=None, link_base_url: str = None, project_id: str = None) -> dict:
         """
@@ -2400,44 +2462,12 @@ class StressTestServer(dl.BaseServiceRunner):
         
         def upload_one(filename):
             try:
-                # Determine mimetype
-                ext = filename.lower().split('.')[-1]
-                mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
-                
-                # Create link URL - ensure it preserves /s if present in base URL
-                link_url = f"{link_base_url_full}/{filename}"
-                # Verify /s is in the URL
-                if '/s/' not in link_url and link_url.count('/s') == 0:
-                    logger.warning(f"[create_link_items] WARNING: Link URL missing '/s': {link_url}")
-                logger.debug(f"Created link URL for {filename}: {link_url}")
-                
-                # Create link item JSON content
-                link_item_content = {
-                    "type": "link",
-                    "shebang": "dataloop",
-                    "metadata": {
-                        "dltype": "link",
-                        "linkInfo": {
-                            "type": "url",
-                            "ref": link_url,
-                            "mimetype": mimetype
-                        }
-                    }
-                }
-                
-                # Upload from in-memory buffer (no temp file)
+                if '/s/' not in link_base_url_full and link_base_url_full.count('/s') == 0:
+                    logger.warning(f"[create_link_items] WARNING: Link URL missing '/s': {link_base_url_full}")
+                logger.debug(f"Created link URL for {filename}: {link_base_url_full}/{filename}")
+                item = self._upload_one_link_item(dataset, filename, link_base_url_full)
                 json_filename = f"{os.path.splitext(filename)[0]}.json"
-                json_bytes = json.dumps(link_item_content).encode('utf-8')
-                buffer = io.BytesIO(json_bytes)
-                item = dataset.items.upload(
-                    local_path=buffer,
-                    remote_path=f'/stress-test/{self.date_str}',
-                    remote_name=json_filename,
-                    overwrite=False
-                )
-                
-                return {'success': True, 'filename': json_filename, 'item_id': item.id, 'link_url': link_url}
-                
+                return {'success': True, 'filename': json_filename, 'item_id': item.id, 'link_url': f"{link_base_url_full}/{filename}"}
             except Exception as e:
                 return {'success': False, 'filename': filename, 'error': str(e)}
         
@@ -4359,10 +4389,13 @@ class ServiceRunner:
                 logger.info(f"        (Target: {max_images} total, Currently: {actual_files_on_disk} in storage)")
                 logger.info("=" * 60)
                 
-                # Download the remaining images
-                # Note: download_images will download up to max_images, but we already have actual_files_on_disk
-                # So we need to download max_images total, and it will skip existing files
-                download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
+                # Download the remaining images (create link items on the fly when we will do link items)
+                do_link_on_download = not (skip_link_items or dataset_has_items)
+                download_result = self.download_images(
+                    max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
+                    create_link_on_download=do_link_on_download,
+                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id
+                )
             else:
                 # Normal download
                 if progress_callback:
@@ -4370,8 +4403,12 @@ class ServiceRunner:
                 logger.info("=" * 60)
                 logger.info(f"STEP 1: Downloading {max_images} COCO images")
                 logger.info("=" * 60)
-                
-                download_result = self.download_images(max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback)
+                do_link_on_download = not (skip_link_items or dataset_has_items)
+                download_result = self.download_images(
+                    max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
+                    create_link_on_download=do_link_on_download,
+                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id
+                )
             
             results['steps'].append({
                 'step': 'download_images',
