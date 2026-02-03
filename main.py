@@ -2201,7 +2201,7 @@ class StressTestServer(dl.BaseServiceRunner):
             }
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None,
-                        create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None) -> dict:
+                        create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None, workflow_id: str = None) -> dict:
         """
         Download images from COCO to NFS storage.
         
@@ -2214,6 +2214,7 @@ class StressTestServer(dl.BaseServiceRunner):
             dataset_id: Required when create_link_on_download=True; dataset to add link items to.
             link_base_url: Required when create_link_on_download=True; base URL for link items.
             project_id: Required when create_link_on_download=True for dataset access.
+            workflow_id: If set, download stops when workflow is cancelled (status 'cancelling'); no new link items are created after cancel.
         
         Returns:
             dict with download results
@@ -2231,11 +2232,12 @@ class StressTestServer(dl.BaseServiceRunner):
         if create_link_on_download:
             logger.info("Create-link-on-download enabled: will create link item immediately after each download")
         
-        # Resolve dataset and link_base_url when create_link_on_download
+        # Resolve dataset and link_base_url when create_link_on_download (include date folder like create_link_items)
         link_dataset = None
         link_base_url_full = None
         if create_link_on_download and dataset_id and link_base_url:
-            link_base_url_full = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
+            base = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
+            link_base_url_full = base if base.endswith(self.date_str) else f"{base}/{self.date_str}"
             try:
                 pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
                 if pid:
@@ -2255,8 +2257,13 @@ class StressTestServer(dl.BaseServiceRunner):
         failed = []
         skipped = []
         
+        def _is_cancelled():
+            return workflow_id and workflow_progress.get(workflow_id, {}).get('status') == 'cancelling'
+
         def download_one(url):
             try:
+                if _is_cancelled():
+                    return {'cancelled': True}
                 filename = os.path.basename(url)
                 filepath = os.path.join(self.storage_path, filename)
                 
@@ -2270,8 +2277,8 @@ class StressTestServer(dl.BaseServiceRunner):
                 with open(filepath, 'wb') as f:
                     f.write(response.content)
                 
-                # Create link item immediately after download when enabled (saves a separate pass)
-                if link_dataset is not None and link_base_url_full:
+                # Create link item immediately after download when enabled (skip if workflow was cancelled)
+                if link_dataset is not None and link_base_url_full and not _is_cancelled():
                     try:
                         self._upload_one_link_item(link_dataset, filename, link_base_url_full)
                     except Exception as link_err:
@@ -2281,41 +2288,44 @@ class StressTestServer(dl.BaseServiceRunner):
             except Exception as e:
                 return {'success': False, 'url': url, 'error': str(e)}
         
-        # Download in parallel with progress logging
+        # Download in parallel with progress logging (stops when workflow is cancelled if workflow_id set)
         completed = 0
+        cancelled_count = 0
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(download_one, url): url for url in image_urls}
             for future in as_completed(futures):
+                if _is_cancelled():
+                    cancelled_count += len(futures) - completed
+                    logger.info(f"Workflow cancelled - stopping download after {completed}/{total_images}")
+                    break
                 result = future.result()
                 completed += 1
-                
-                if result['success']:
+                if result.get('cancelled'):
+                    cancelled_count += 1
+                    continue
+                if result.get('success'):
                     if result.get('skipped'):
                         skipped.append(result)
                     else:
                         downloaded.append(result)
                 else:
                     failed.append(result)
-                
                 # Log progress every 100 images
                 if completed % 100 == 0 or completed == total_images:
                     progress_pct = (completed / total_images) * 100
                     progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
                     logger.info(progress_msg)
-                    # Update progress callback if provided
                     if progress_callback:
-                        # Calculate progress within download step (15% to 40% of overall workflow)
-                        overall_progress = 15 + (progress_pct / 100) * 25  # 15% to 40%
+                        overall_progress = 15 + (progress_pct / 100) * 25
                         progress_callback('download_images', 'running', overall_progress, progress_msg)
-        
-        logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed")
+        logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed" + (f", {cancelled_count} cancelled" if cancelled_count else ""))
         
         # List actual files in directory
         actual_files = []
         if os.path.exists(self.storage_path):
             actual_files = [f for f in os.listdir(self.storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         
-        return {
+        out = {
             'storage_path': self.storage_path,
             'total_requested': total_images,
             'downloaded': len(downloaded),
@@ -2324,7 +2334,10 @@ class StressTestServer(dl.BaseServiceRunner):
             'actual_files_on_disk': len(actual_files),
             'files': actual_files
         }
-    
+        if cancelled_count:
+            out['cancelled'] = cancelled_count
+        return out
+
     def _upload_one_link_item(self, dataset, filename: str, link_base_url_full: str):
         """
         Create and upload one link item (JSON) to the dataset from an in-memory buffer.
@@ -2356,7 +2369,7 @@ class StressTestServer(dl.BaseServiceRunner):
         )
         return item
     
-    def create_link_items(self, dataset_id: str = None, filenames: list = None, num_workers: int = 20, progress_callback=None, link_base_url: str = None, project_id: str = None) -> dict:
+    def create_link_items(self, dataset_id: str = None, filenames: list = None, num_workers: int = 20, progress_callback=None, link_base_url: str = None, project_id: str = None, workflow_id: str = None) -> dict:
         """
         Create link items in dataset for downloaded images (parallel upload).
         
@@ -2367,6 +2380,7 @@ class StressTestServer(dl.BaseServiceRunner):
             progress_callback: Optional callback for progress updates
             link_base_url: Base URL for link items (overrides instance default)
             project_id: Project ID (required if dataset access needs project context)
+            workflow_id: If set, upload stops when workflow is cancelled (status 'cancelling').
         
         Returns:
             dict with creation results
@@ -2459,9 +2473,14 @@ class StressTestServer(dl.BaseServiceRunner):
         
         created = []
         failed = []
-        
+
+        def _is_cancelled():
+            return workflow_id and workflow_progress.get(workflow_id, {}).get('status') == 'cancelling'
+
         def upload_one(filename):
             try:
+                if _is_cancelled():
+                    return {'cancelled': True}
                 if '/s/' not in link_base_url_full and link_base_url_full.count('/s') == 0:
                     logger.warning(f"[create_link_items] WARNING: Link URL missing '/s': {link_base_url_full}")
                 logger.debug(f"Created link URL for {filename}: {link_base_url_full}/{filename}")
@@ -2470,35 +2489,37 @@ class StressTestServer(dl.BaseServiceRunner):
                 return {'success': True, 'filename': json_filename, 'item_id': item.id, 'link_url': f"{link_base_url_full}/{filename}"}
             except Exception as e:
                 return {'success': False, 'filename': filename, 'error': str(e)}
-        
-        # Upload in parallel with progress logging
+
+        # Upload in parallel with progress logging (stops when workflow is cancelled if workflow_id set)
         completed = 0
+        cancelled_count = 0
         total_to_upload = len(filenames_to_upload)
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {executor.submit(upload_one, fn): fn for fn in filenames_to_upload}
             for future in as_completed(futures):
+                if _is_cancelled():
+                    cancelled_count = total_to_upload - completed
+                    logger.info(f"Workflow cancelled - stopping link item creation after {completed}/{total_to_upload}")
+                    break
                 result = future.result()
                 completed += 1
-                
-                if result['success']:
+                if result.get('cancelled'):
+                    cancelled_count += 1
+                    continue
+                if result.get('success'):
                     created.append(result)
                 else:
                     failed.append(result)
-                
-                # Log progress every 100 items
                 if completed % 100 == 0 or completed == total_to_upload:
                     progress_pct = (completed / total_to_upload) * 100 if total_to_upload > 0 else 0
                     progress_msg = f"Progress: {completed}/{total_to_upload} ({progress_pct:.1f}%) - Created: {len(created)}, Failed: {len(failed)}"
                     logger.info(progress_msg)
-                    # Update progress callback if provided
                     if progress_callback:
-                        # Calculate progress within link items step (45% to 60% of overall workflow)
-                        overall_progress = 45 + (progress_pct / 100) * 15  # 45% to 60%
+                        overall_progress = 45 + (progress_pct / 100) * 15
                         progress_callback('create_link_items', 'running', overall_progress, progress_msg)
+        logger.info(f"Link items complete: {len(created)} created, {skipped_count} skipped, {len(failed)} failed" + (f", {cancelled_count} cancelled" if cancelled_count else ""))
         
-        logger.info(f"Link items complete: {len(created)} created, {skipped_count} skipped, {len(failed)} failed")
-        
-        return {
+        out = {
             'dataset_id': dataset_id,
             'storage_path': self.storage_path,
             'link_base_url': link_base_url_full,
@@ -2509,7 +2530,10 @@ class StressTestServer(dl.BaseServiceRunner):
             'failed_items': failed[:10] if failed else [],
             'sample_items': created[:5] if created else []
         }
-    
+        if cancelled_count:
+            out['cancelled'] = cancelled_count
+        return out
+
     def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None, pipeline_concurrency: int = 30, pipeline_max_replicas: int = 12) -> dict:
         """
         Create stress test pipeline with ResNet model node.
@@ -4394,7 +4418,8 @@ class ServiceRunner:
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
-                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id
+                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
+                    workflow_id=getattr(self, '_current_workflow_id', None)
                 )
             else:
                 # Normal download
@@ -4407,13 +4432,18 @@ class ServiceRunner:
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
-                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id
+                    dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
+                    workflow_id=getattr(self, '_current_workflow_id', None)
                 )
             
             results['steps'].append({
                 'step': 'download_images',
                 'result': download_result
             })
+            wf_id = getattr(self, '_current_workflow_id', None)
+            if wf_id and workflow_progress.get(wf_id, {}).get('status') == 'cancelling':
+                logger.info("Workflow cancelled after download step - exiting early")
+                return results
             filenames = download_result.get('files', [])
             # Limit filenames to max_images (download_images returns all files in storage, not just downloaded ones)
             if len(filenames) > max_images:
@@ -4456,12 +4486,17 @@ class ServiceRunner:
                 num_workers=num_workers,
                 progress_callback=progress_callback,
                 link_base_url=link_base_url,
-                project_id=project_id
+                project_id=project_id,
+                workflow_id=getattr(self, '_current_workflow_id', None)
             )
             results['steps'].append({
                 'step': 'create_link_items',
                 'result': link_result
             })
+            wf_id = getattr(self, '_current_workflow_id', None)
+            if wf_id and workflow_progress.get(wf_id, {}).get('status') == 'cancelling':
+                logger.info("Workflow cancelled after link items step - exiting early")
+                return results
             if progress_callback:
                 created = link_result.get('created', 0)
                 progress_callback('create_link_items', 'completed', 60, f'Created {created} link items')
