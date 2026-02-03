@@ -2423,7 +2423,7 @@ class StressTestServer(dl.BaseServiceRunner):
         total_files = len(filenames)
         logger.info(f"Creating {total_files} link items with {num_workers} workers...")
         
-        # Get existing items to skip
+        # Get existing items to skip (includes link items created on-the-fly during download)
         logger.info("Fetching existing items to skip duplicates...")
         existing_items = set()
         try:
