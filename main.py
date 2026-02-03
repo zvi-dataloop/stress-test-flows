@@ -793,18 +793,19 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 30)
             pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
-            # If dataset_id is empty, automatically create dataset (treat as create_dataset=true)
-            create_dataset_param = data.get('createDataset') or data.get('create_dataset', False)
-            if not dataset_id_param or dataset_id_param.strip() == '':
-                create_dataset = True
-                logger.info(f"Dataset ID is empty, automatically enabling dataset creation")
-            else:
-                create_dataset = create_dataset_param
+            # Only create dataset when explicitly requested (don't auto-create when dataset field is empty)
+            create_dataset = data.get('createDataset') or data.get('create_dataset', False)
             skip_download = data.get('skipDownload') or data.get('skip_download', False)
             skip_link_items = data.get('skipLinkItems') or data.get('skip_link_items', False)
             skip_pipeline = data.get('skipPipeline') or data.get('skip_pipeline', False)
             skip_execute = data.get('skipExecute') or data.get('skip_execute', False)
-            link_base_url = data.get('linkBaseUrl') or data.get('link_base_url') or DEFAULT_LINK_BASE_URL
+            # Use Link Base URL from request only when provided; default only when missing or empty
+            link_base_url = data.get('linkBaseUrl') or data.get('link_base_url')
+            if isinstance(link_base_url, str):
+                link_base_url = link_base_url.strip()
+            if link_base_url is None or link_base_url == '':
+                link_base_url = DEFAULT_LINK_BASE_URL
+            logger.info(f"Workflow params: dataset_id={dataset_id_param!r}, create_dataset={create_dataset}, link_base_url={link_base_url!r}")
             
             # Generate unique workflow ID
             import uuid
@@ -4466,12 +4467,20 @@ class ServiceRunner:
             if progress_callback:
                 progress_callback('create_dataset', 'completed', 10, f'Dataset ready: {dataset_id}')
         else:
-            # Use provided dataset_id or default
-            if dataset_id is None:
-                dataset_id = self.default_dataset_id
+            # Not creating dataset: use provided dataset_id only (do not substitute default when user left field empty)
+            if original_dataset_id_empty:
+                dataset_id = None  # User left dataset field empty and did not create - no dataset
+            else:
+                dataset_id = (dataset_id or '').strip() if dataset_id else ''
+                dataset_id = dataset_id if dataset_id else None
+                if dataset_id is None:
+                    dataset_id = self.default_dataset_id
             results['dataset_id'] = dataset_id
             if progress_callback:
-                progress_callback('create_dataset', 'skipped', 5, f'Using existing dataset: {dataset_id}')
+                if dataset_id:
+                    progress_callback('create_dataset', 'skipped', 5, f'Using existing dataset: {dataset_id}')
+                else:
+                    progress_callback('create_dataset', 'skipped', 5, 'No dataset specified (download only, no link items)')
         
         # Check if dataset exists and has items - if so, skip download and link_items
         # BUT: if we just created a new dataset (because dataset_id was empty), it won't have items yet
@@ -4638,16 +4647,16 @@ class ServiceRunner:
                 else:
                     progress_callback('create_link_items', 'skipped', 45, 'Skipped link items creation')
         
-        # Step 3: Create pipeline
+        # Step 3: Create pipeline (requires dataset_id)
         pipeline_id = None
         logger.info("=" * 60)
-        logger.info(f"STEP 3: Checking pipeline creation - skip_pipeline={skip_pipeline}")
+        logger.info(f"STEP 3: Checking pipeline creation - skip_pipeline={skip_pipeline}, dataset_id={dataset_id!r}")
         logger.info("=" * 60)
         if progress_callback:
             progress_callback('pipeline_check', 'running', 60, f'Checking pipeline creation: skip_pipeline={skip_pipeline}')
             logger.info(f"[Progress] Sent pipeline_check update: skip_pipeline={skip_pipeline}")
         
-        if not skip_pipeline:
+        if not skip_pipeline and dataset_id:
             logger.info(f"[Step 3] Pipeline creation NOT skipped - proceeding with creation")
             if progress_callback:
                 progress_callback('create_pipeline', 'running', 65, 'Creating pipeline with ResNet...')
@@ -4683,13 +4692,14 @@ class ServiceRunner:
                                 workflow_progress[self._current_workflow_id]['result'] = {}
                             workflow_progress[self._current_workflow_id]['result']['pipeline_id'] = pipeline_id
         else:
+            skip_reason = 'skip_pipeline=True' if skip_pipeline else 'No dataset specified (dataset_id required for pipeline)'
             logger.warning("=" * 60)
-            logger.warning("STEP 3: Pipeline creation SKIPPED (skip_pipeline=True)")
+            logger.warning(f"STEP 3: Pipeline creation SKIPPED - {skip_reason}")
             logger.warning("=" * 60)
             if progress_callback:
-                progress_callback('create_pipeline', 'skipped', 65, 'Skipped pipeline creation')
+                progress_callback('create_pipeline', 'skipped', 65, f'Skipped: {skip_reason}')
                 logger.info(f"[Progress] Sent create_pipeline skipped update")
-            results['steps'].append({'step': 'create_pipeline', 'skipped': True, 'reason': 'skip_pipeline=True'})
+            results['steps'].append({'step': 'create_pipeline', 'skipped': True, 'reason': skip_reason})
             logger.warning(f"[Step 3] Pipeline creation was skipped - pipeline_id will be None")
         
         # Step 4: Execute pipeline batch
@@ -4699,8 +4709,8 @@ class ServiceRunner:
         if progress_callback:
             progress_callback('execute_check', 'running', 82, f'Checking execution conditions: skip_execute={skip_execute}, pipeline_id={pipeline_id}')
         
-        if not skip_execute and pipeline_id:
-            logger.info(f"✓ Conditions met: skip_execute=False, pipeline_id={pipeline_id} - proceeding with batch execution")
+        if not skip_execute and pipeline_id and dataset_id:
+            logger.info(f"✓ Conditions met: skip_execute=False, pipeline_id={pipeline_id}, dataset_id={dataset_id} - proceeding with batch execution")
             if progress_callback:
                 progress_callback('execute_pipeline_batch', 'running', 85, 'Executing pipeline batch...')
             logger.info("=" * 60)
@@ -4742,7 +4752,14 @@ class ServiceRunner:
                     logger.warning(f"[Workflow] Batch execution returned but success status unclear: {execute_result}")
                     progress_callback('execute_pipeline_batch', 'completed', 95, f'Batch execution finished (status unclear)')
         else:
-            skip_reason = 'skip_execute=True' if skip_execute else f'pipeline_id is None (pipeline creation may have failed)'
+            if skip_execute:
+                skip_reason = 'skip_execute=True'
+            elif not dataset_id:
+                skip_reason = 'No dataset specified (dataset_id required for execution)'
+            elif not pipeline_id:
+                skip_reason = 'pipeline_id is None (pipeline creation may have failed)'
+            else:
+                skip_reason = 'Conditions not met'
             logger.warning("=" * 60)
             logger.warning(f"STEP 4: Pipeline execution SKIPPED - {skip_reason}")
             logger.warning(f"STEP 4: skip_execute={skip_execute}, pipeline_id={pipeline_id}")
