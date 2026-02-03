@@ -799,8 +799,13 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 30)
             pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
-            # Only create dataset when explicitly requested (don't auto-create when dataset field is empty)
-            create_dataset = data.get('createDataset') or data.get('create_dataset', False)
+            # When dataset field is empty, auto-create a dataset so we can create link items and run the pipeline
+            create_dataset_param = data.get('createDataset') or data.get('create_dataset', False)
+            if not dataset_id_param or (isinstance(dataset_id_param, str) and dataset_id_param.strip() == ''):
+                create_dataset = True
+                logger.info("Dataset ID is empty: will create a new dataset and upload link items to it")
+            else:
+                create_dataset = create_dataset_param
             skip_download = data.get('skipDownload') or data.get('skip_download', False)
             skip_link_items = data.get('skipLinkItems') or data.get('skip_link_items', False)
             skip_pipeline = data.get('skipPipeline') or data.get('skip_pipeline', False)
@@ -2457,7 +2462,7 @@ class StressTestServer(dl.BaseServiceRunner):
                     except Exception as e:
                         logger.exception(f"Chunk failed: {e}")
                         completed += len(future_to_chunk[future][0])
-                    if completed % 100 == 0 or completed == total_images:
+                    if completed % 50 == 0 or completed == total_images:
                         progress_pct = (completed / total_images) * 100 if total_images else 0
                         progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
                         logger.info(progress_msg)
@@ -2520,7 +2525,7 @@ class StressTestServer(dl.BaseServiceRunner):
                             downloaded.append(result)
                     else:
                         failed.append(result)
-                    if completed % 100 == 0 or completed == total_images:
+                    if completed % 50 == 0 or completed == total_images:
                         progress_pct = (completed / total_images) * 100 if total_images else 0
                         progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
                         logger.info(progress_msg)
@@ -2528,6 +2533,7 @@ class StressTestServer(dl.BaseServiceRunner):
                             overall_progress = 15 + (progress_pct / 100) * 25
                             progress_callback('download_images', 'running', overall_progress, progress_msg)
         logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed" + (f", {cancelled_count} cancelled" if cancelled_count else ""))
+
         
         # List actual files in directory
         actual_files = []
