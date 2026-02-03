@@ -135,8 +135,46 @@ DOWNLOAD_THREADS_PER_PROCESS = 32
 DOWNLOAD_MAX_PROCESSES = 32
 
 
-def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, date_str: str):
-    """Create one link item in dataset. Used inside worker process (no self)."""
+def _remote_path_from_link_base_url(link_base_url: str, date_str: str) -> str:
+    """
+    Derive dataset remote path from Link Base URL so it matches the URL path.
+    E.g. http://host/s/pd_datfs2/stress-test2 -> /stress-test2/{date_str}
+    Falls back to /stress-test/{date_str} if path cannot be derived.
+    """
+    if not link_base_url or not date_str:
+        return f'/stress-test/{date_str}'
+    parsed = urlparse(link_base_url)
+    path = (parsed.path or '').strip('/')
+    # If URL already has date at the end (e.g. .../stress-test2/2025-02-03), use the segment before it
+    if path.endswith('/' + date_str):
+        path = path[:-len(date_str) - 1].rstrip('/')
+    parts = [p for p in path.split('/') if p]
+    folder = parts[-1] if parts else 'stress-test'
+    return f'/{folder}/{date_str}'
+
+
+def _storage_path_from_link_base_url(link_base_url: str, date_str: str):
+    """
+    Derive filesystem storage path for download from Link Base URL.
+    E.g. http://host/s/pd_datfs2/stress-test2 -> /s/pd_datfs2/stress-test2/{date_str}
+    Returns None if link_base_url is missing (caller should use default storage_path).
+    """
+    if not link_base_url or not date_str:
+        return None
+    parsed = urlparse(link_base_url)
+    path = (parsed.path or '').strip('/')
+    if path.endswith('/' + date_str):
+        path = path[:-len(date_str) - 1].rstrip('/')
+    if not path:
+        return None
+    base = '/' + path if not path.startswith('/') else path
+    return f'{base}/{date_str}'
+
+
+def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, date_str: str, overwrite: bool = True):
+    """Create or update one link item in dataset. Used inside worker process (no self).
+    overwrite=True ensures existing items get the correct link URL (create or replace).
+    """
     ext = filename.lower().split('.')[-1]
     mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
     link_url = f"{link_base_url_full}/{filename}"
@@ -155,11 +193,12 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
     json_filename = f"{os.path.splitext(filename)[0]}.json"
     json_bytes = json.dumps(link_item_content).encode('utf-8')
     buffer = io.BytesIO(json_bytes)
+    remote_path = _remote_path_from_link_base_url(link_base_url_full, date_str)
     dataset.items.upload(
         local_path=buffer,
-        remote_path=f'/stress-test/{date_str}',
+        remote_path=remote_path,
         remote_name=json_filename,
-        overwrite=False
+        overwrite=overwrite
     )
 
 
@@ -195,18 +234,19 @@ def _download_chunk_worker(args):
                 return {'cancelled': True}
             filename = os.path.basename(url)
             filepath = os.path.join(storage_path, filename)
-            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                return {'success': True, 'filename': filename, 'path': filepath, 'skipped': True}
-            response = requests.get(url, timeout=60)
-            response.raise_for_status()
-            with open(filepath, 'wb') as f:
-                f.write(response.content)
+            file_existed = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+            if not file_existed:
+                response = requests.get(url, timeout=60)
+                response.raise_for_status()
+                with open(filepath, 'wb') as f:
+                    f.write(response.content)
+            # Ensure link item in dataset for every file (downloaded or already present) with correct URL (create or overwrite)
             if link_dataset is not None and link_base_url_full and not _is_cancelled():
                 try:
-                    _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, date_str)
+                    _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, date_str, overwrite=True)
                 except Exception as link_err:
-                    log.warning(f"Create link on download failed for {filename}: {link_err}")
-            return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
+                    log.warning(f"Ensure link item failed for {filename}: {link_err}")
+            return {'success': True, 'filename': filename, 'path': filepath, 'skipped': file_existed}
         except Exception as e:
             return {'success': False, 'url': url, 'error': str(e)}
 
@@ -2332,7 +2372,12 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
         total_images = len(image_urls)
-        logger.info(f"Starting download of {total_images} images to {self.storage_path}")
+        # Use storage path from Link Base URL when provided (e.g. .../stress-test2 -> .../stress-test2/date)
+        link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
+        storage_path = _storage_path_from_link_base_url(link_base_for_storage, self.date_str) if link_base_for_storage else None
+        if storage_path is None:
+            storage_path = self.storage_path
+        logger.info(f"Starting download of {total_images} images to {storage_path}")
         # Resolve link_base_url for workers (each process will get dataset by id; no shared memory)
         link_base_url_full = None
         if create_link_on_download and dataset_id and link_base_url:
@@ -2346,13 +2391,13 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info("Create-link-on-download enabled: each process will create link items after download")
 
         # Create directory
-        os.makedirs(self.storage_path, exist_ok=True)
+        os.makedirs(storage_path, exist_ok=True)
 
         # Split into bulks of 1000 for separate processes (data extracted here, no shared memory)
         chunks = [image_urls[i:i + DOWNLOAD_CHUNK_SIZE] for i in range(0, len(image_urls), DOWNLOAD_CHUNK_SIZE)]
         max_processes = min(DOWNLOAD_MAX_PROCESSES, len(chunks))
         worker_args = [
-            (chunk, self.storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, threads_per_process)
+            (chunk, storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, threads_per_process)
             for chunk in chunks
         ]
 
@@ -2396,11 +2441,11 @@ class StressTestServer(dl.BaseServiceRunner):
         
         # List actual files in directory
         actual_files = []
-        if os.path.exists(self.storage_path):
-            actual_files = [f for f in os.listdir(self.storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+        if os.path.exists(storage_path):
+            actual_files = [f for f in os.listdir(storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
         
         out = {
-            'storage_path': self.storage_path,
+            'storage_path': storage_path,
             'total_requested': total_images,
             'downloaded': len(downloaded),
             'skipped': len(skipped),
@@ -2435,9 +2480,10 @@ class StressTestServer(dl.BaseServiceRunner):
         json_filename = f"{os.path.splitext(filename)[0]}.json"
         json_bytes = json.dumps(link_item_content).encode('utf-8')
         buffer = io.BytesIO(json_bytes)
+        remote_path = _remote_path_from_link_base_url(link_base_url_full, self.date_str)
         item = dataset.items.upload(
             local_path=buffer,
-            remote_path=f'/stress-test/{self.date_str}',
+            remote_path=remote_path,
             remote_name=json_filename,
             overwrite=False
         )
@@ -2515,7 +2561,7 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("Fetching existing items to skip duplicates...")
         existing_items = set()
         try:
-            remote_path = f'/stress-test/{self.date_str}'
+            remote_path = _remote_path_from_link_base_url(link_base_url_full, self.date_str)
             filters = dl.Filters()
             filters.add(field='dir', values=remote_path)
             pages = dataset.items.list(filters=filters)
@@ -4284,9 +4330,13 @@ class ServiceRunner:
         Returns:
             dict with full results
         """
+        # Use storage path from Link Base URL when provided (same as download_images)
+        effective_storage_path = _storage_path_from_link_base_url(link_base_url, self.date_str) if link_base_url else None
+        if effective_storage_path is None:
+            effective_storage_path = self.storage_path
         results = {
             'date': self.date_str,
-            'storage_path': self.storage_path,
+            'storage_path': effective_storage_path,
             'max_images': max_images,
             'steps': []
         }
@@ -4297,11 +4347,11 @@ class ServiceRunner:
         
         # Check actual files in storage
         actual_files_on_disk = 0
-        if os.path.exists(self.storage_path):
-            actual_files_on_disk = len([f for f in os.listdir(self.storage_path) 
+        if os.path.exists(effective_storage_path):
+            actual_files_on_disk = len([f for f in os.listdir(effective_storage_path) 
                                        if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
         
-        logger.info(f"Storage check: {actual_files_on_disk} files found in {self.storage_path}")
+        logger.info(f"Storage check: {actual_files_on_disk} files found in {effective_storage_path}")
         
         # Track if dataset_id was originally empty (before any creation)
         original_dataset_id_empty = (dataset_id is None or dataset_id == '')
@@ -4526,9 +4576,9 @@ class ServiceRunner:
             if progress_callback:
                 progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
         else:
-            # Get existing files
-            if os.path.exists(self.storage_path):
-                all_filenames = [f for f in os.listdir(self.storage_path) 
+            # Get existing files (use same path as download would use when link_base_url is set)
+            if os.path.exists(effective_storage_path):
+                all_filenames = [f for f in os.listdir(effective_storage_path) 
                             if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
                 # Limit to max_images if we have more than needed
                 filenames = all_filenames[:max_images] if len(all_filenames) > max_images else all_filenames
@@ -4544,14 +4594,14 @@ class ServiceRunner:
                 else:
                     progress_callback('download_images', 'skipped', 15, f'Using {len(filenames)} existing images')
         
-        # Step 2: Create link items
-        # Auto-skip if dataset has items (unless explicitly requested)
-        should_skip_link_items = skip_link_items or dataset_has_items
+        # Step 2: Create link items (only when download step was skipped - otherwise links are already ensured in the process-pool)
+        # When we ran the download step, each worker ensures file exists + link item with correct URL (create or overwrite) for every item
+        should_skip_link_items = skip_link_items or dataset_has_items or (not should_skip_download)
         if not should_skip_link_items:
             if progress_callback:
                 progress_callback('create_link_items', 'running', 45, f'Creating {len(filenames)} link items...')
             logger.info("=" * 60)
-            logger.info(f"STEP 2: Creating {len(filenames)} link items")
+            logger.info(f"STEP 2: Creating {len(filenames)} link items (download was skipped)")
             logger.info("=" * 60)
             
             link_result = self.create_link_items(
@@ -4575,10 +4625,15 @@ class ServiceRunner:
                 created = link_result.get('created', 0)
                 progress_callback('create_link_items', 'completed', 60, f'Created {created} link items')
         else:
-            skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
+            if not should_skip_download:
+                skip_reason = 'Link items already ensured in download step (process-pool)'
+            else:
+                skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
             results['steps'].append({'step': 'create_link_items', 'skipped': True, 'reason': skip_reason, 'dataset_items': items_count})
             if progress_callback:
-                if dataset_has_items:
+                if not should_skip_download:
+                    progress_callback('create_link_items', 'skipped', 60, 'Link items ensured in download step')
+                elif dataset_has_items:
                     progress_callback('create_link_items', 'skipped', 45, f'Skipped: Dataset already has {items_count} items')
                 else:
                     progress_callback('create_link_items', 'skipped', 45, 'Skipped link items creation')
