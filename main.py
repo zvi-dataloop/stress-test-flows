@@ -20,8 +20,6 @@ from urllib.parse import urlparse, parse_qs
 import dtlpy as dl
 import requests
 
-from download_worker import run_download_chunk  # used by process pool; child processes import only this module
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('stress-test-server')
 
@@ -2429,7 +2427,7 @@ class StressTestServer(dl.BaseServiceRunner):
         # Use worker from separate module so spawned child processes only import download_worker (not main.py)
         executor = ProcessPoolExecutor(max_workers=max_processes, mp_context=process_context)
         try:
-            future_to_chunk = {executor.submit(run_download_chunk, a): a for a in worker_args}
+            future_to_chunk = {executor.submit(_download_chunk_worker, a): a for a in worker_args}
             for future in as_completed(future_to_chunk):
                 if _is_cancelled():
                     cancelled_count = total_images - completed
