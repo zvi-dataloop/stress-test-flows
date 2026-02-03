@@ -13,7 +13,7 @@ from threading import Thread
 import zipfile
 import io
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 import dtlpy as dl
@@ -127,6 +127,106 @@ def get_coco_images(dataset: str = 'all'):
     logger.info(f"Total: {len(urls)} COCO image URLs available")
     _coco_image_cache = urls
     return urls
+
+
+# Process-pool constants for download_images (after annotations / URL list is ready)
+DOWNLOAD_CHUNK_SIZE = 1000
+DOWNLOAD_THREADS_PER_PROCESS = 32
+DOWNLOAD_MAX_PROCESSES = 32
+
+
+def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, date_str: str):
+    """Create one link item in dataset. Used inside worker process (no self)."""
+    ext = filename.lower().split('.')[-1]
+    mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
+    link_url = f"{link_base_url_full}/{filename}"
+    link_item_content = {
+        "type": "link",
+        "shebang": "dataloop",
+        "metadata": {
+            "dltype": "link",
+            "linkInfo": {
+                "type": "url",
+                "ref": link_url,
+                "mimetype": mimetype
+            }
+        }
+    }
+    json_filename = f"{os.path.splitext(filename)[0]}.json"
+    json_bytes = json.dumps(link_item_content).encode('utf-8')
+    buffer = io.BytesIO(json_bytes)
+    dataset.items.upload(
+        local_path=buffer,
+        remote_path=f'/stress-test/{date_str}',
+        remote_name=json_filename,
+        overwrite=False
+    )
+
+
+def _download_chunk_worker(args):
+    """
+    Run in a separate process: download a chunk of URLs using N threads.
+    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str, workflow_id, create_link, threads_per_process)
+    Returns: (downloaded, failed, skipped) lists of result dicts.
+    """
+    (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str,
+     workflow_id, create_link, threads_per_process) = args
+    log = logging.getLogger('stress-test-server')
+    cancel_file = f"/tmp/stress_cancel_{workflow_id}" if workflow_id else None
+
+    def _is_cancelled():
+        return cancel_file and os.path.exists(cancel_file)
+
+    link_dataset = None
+    if create_link and dataset_id and link_base_url_full:
+        try:
+            pid = project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            if pid:
+                project = dl.projects.get(project_id=pid)
+                link_dataset = project.datasets.get(dataset_id=dataset_id)
+            else:
+                link_dataset = dl.datasets.get(dataset_id=dataset_id)
+        except Exception as e:
+            log.warning(f"Could not get dataset in worker: {e}")
+
+    def download_one(url):
+        try:
+            if _is_cancelled():
+                return {'cancelled': True}
+            filename = os.path.basename(url)
+            filepath = os.path.join(storage_path, filename)
+            if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
+                return {'success': True, 'filename': filename, 'path': filepath, 'skipped': True}
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            with open(filepath, 'wb') as f:
+                f.write(response.content)
+            if link_dataset is not None and link_base_url_full and not _is_cancelled():
+                try:
+                    _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, date_str)
+                except Exception as link_err:
+                    log.warning(f"Create link on download failed for {filename}: {link_err}")
+            return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
+        except Exception as e:
+            return {'success': False, 'url': url, 'error': str(e)}
+
+    downloaded, failed, skipped = [], [], []
+    with ThreadPoolExecutor(max_workers=threads_per_process) as executor:
+        futures = {executor.submit(download_one, url): url for url in chunk_urls}
+        for future in as_completed(futures):
+            if _is_cancelled():
+                break
+            result = future.result()
+            if result.get('cancelled'):
+                continue
+            if result.get('success'):
+                if result.get('skipped'):
+                    skipped.append(result)
+                else:
+                    downloaded.append(result)
+            else:
+                failed.append(result)
+    return (downloaded, failed, skipped)
 
 
 class StressTestHandler(SimpleHTTPRequestHandler):
@@ -876,6 +976,11 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'message': 'Cancellation requested - uninstalling and deleting pipeline...'
             })
             logger.info(f"Workflow {workflow_id} marked as cancelling")
+            # Signal worker processes (they check this file; no shared memory)
+            try:
+                open(f"/tmp/stress_cancel_{workflow_id}", "w").close()
+            except Exception:
+                pass
             
             # Get pipeline_id from result
             pipeline_id = None
@@ -2228,96 +2333,65 @@ class StressTestServer(dl.BaseServiceRunner):
         
         total_images = len(image_urls)
         logger.info(f"Starting download of {total_images} images to {self.storage_path}")
-        logger.info(f"Using {num_workers} parallel workers")
-        if create_link_on_download:
-            logger.info("Create-link-on-download enabled: will create link item immediately after each download")
-        
-        # Resolve dataset and link_base_url when create_link_on_download (include date folder like create_link_items)
-        link_dataset = None
+        # Resolve link_base_url for workers (each process will get dataset by id; no shared memory)
         link_base_url_full = None
         if create_link_on_download and dataset_id and link_base_url:
             base = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
             link_base_url_full = base if base.endswith(self.date_str) else f"{base}/{self.date_str}"
-            try:
-                pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
-                if pid:
-                    project = dl.projects.get(project_id=pid)
-                    link_dataset = project.datasets.get(dataset_id=dataset_id)
-                else:
-                    link_dataset = dl.datasets.get(dataset_id=dataset_id)
-            except Exception as e:
-                logger.warning(f"Could not get dataset for create_link_on_download: {e}; will create link items in batch later")
-                link_dataset = None
-                link_base_url_full = None
-        
+        create_link = bool(create_link_on_download and dataset_id and link_base_url_full)
+        pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+        threads_per_process = num_workers if num_workers and num_workers > 0 else DOWNLOAD_THREADS_PER_PROCESS
+        logger.info(f"Using process pool: chunks of {DOWNLOAD_CHUNK_SIZE}, {threads_per_process} threads per process, max {DOWNLOAD_MAX_PROCESSES} processes")
+        if create_link:
+            logger.info("Create-link-on-download enabled: each process will create link items after download")
+
         # Create directory
         os.makedirs(self.storage_path, exist_ok=True)
-        
+
+        # Split into bulks of 1000 for separate processes (data extracted here, no shared memory)
+        chunks = [image_urls[i:i + DOWNLOAD_CHUNK_SIZE] for i in range(0, len(image_urls), DOWNLOAD_CHUNK_SIZE)]
+        max_processes = min(DOWNLOAD_MAX_PROCESSES, len(chunks))
+        worker_args = [
+            (chunk, self.storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, threads_per_process)
+            for chunk in chunks
+        ]
+
         downloaded = []
         failed = []
         skipped = []
-        
+        cancelled_count = 0
+
         def _is_cancelled():
             return workflow_id and workflow_progress.get(workflow_id, {}).get('status') == 'cancelling'
 
-        def download_one(url):
-            try:
-                if _is_cancelled():
-                    return {'cancelled': True}
-                filename = os.path.basename(url)
-                filepath = os.path.join(self.storage_path, filename)
-                
-                # Skip if already exists
-                if os.path.exists(filepath) and os.path.getsize(filepath) > 0:
-                    return {'success': True, 'filename': filename, 'path': filepath, 'skipped': True}
-                
-                response = requests.get(url, timeout=60)
-                response.raise_for_status()
-                
-                with open(filepath, 'wb') as f:
-                    f.write(response.content)
-                
-                # Create link item immediately after download when enabled (skip if workflow was cancelled)
-                if link_dataset is not None and link_base_url_full and not _is_cancelled():
-                    try:
-                        self._upload_one_link_item(link_dataset, filename, link_base_url_full)
-                    except Exception as link_err:
-                        logger.warning(f"Create link on download failed for {filename}: {link_err}")
-                
-                return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
-            except Exception as e:
-                return {'success': False, 'url': url, 'error': str(e)}
-        
-        # Download in parallel with progress logging (stops when workflow is cancelled if workflow_id set)
         completed = 0
-        cancelled_count = 0
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            futures = {executor.submit(download_one, url): url for url in image_urls}
-            for future in as_completed(futures):
+        executor = ProcessPoolExecutor(max_workers=max_processes)
+        try:
+            future_to_chunk = {executor.submit(_download_chunk_worker, a): a for a in worker_args}
+            for future in as_completed(future_to_chunk):
                 if _is_cancelled():
-                    cancelled_count += len(futures) - completed
+                    cancelled_count = total_images - completed
                     logger.info(f"Workflow cancelled - stopping download after {completed}/{total_images}")
                     break
-                result = future.result()
-                completed += 1
-                if result.get('cancelled'):
-                    cancelled_count += 1
-                    continue
-                if result.get('success'):
-                    if result.get('skipped'):
-                        skipped.append(result)
-                    else:
-                        downloaded.append(result)
-                else:
-                    failed.append(result)
-                # Log progress every 100 images
+                try:
+                    d, f, s = future.result()
+                    downloaded.extend(d)
+                    failed.extend(f)
+                    skipped.extend(s)
+                    completed += len(d) + len(f) + len(s)
+                except Exception as e:
+                    logger.exception(f"Chunk failed: {e}")
+                    completed += len(future_to_chunk[future][0])  # chunk size
                 if completed % 100 == 0 or completed == total_images:
-                    progress_pct = (completed / total_images) * 100
+                    progress_pct = (completed / total_images) * 100 if total_images else 0
                     progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
                     logger.info(progress_msg)
                     if progress_callback:
                         overall_progress = 15 + (progress_pct / 100) * 25
                         progress_callback('download_images', 'running', overall_progress, progress_msg)
+        finally:
+            # On cancel, don't wait for remaining worker processes to finish
+            executor.shutdown(wait=not _is_cancelled())
         logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed" + (f", {cancelled_count} cancelled" if cancelled_count else ""))
         
         # List actual files in directory
