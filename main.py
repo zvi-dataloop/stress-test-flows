@@ -49,12 +49,13 @@ workflow_progress = {}  # workflow_id -> {status, current_step, progress_pct, lo
 _stress_test_server_instance = None
 
 
-def get_coco_images(dataset: str = 'all'):
+def get_coco_images(dataset: str = 'all', progress_callback=None):
     """
     Get COCO image URLs.
     
     Args:
         dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
+        progress_callback: optional (step, status, pct, message) to report e.g. "Downloading annotations..."
     
     Returns:
         list of image URLs
@@ -70,9 +71,18 @@ def get_coco_images(dataset: str = 'all'):
     train_ids = []
     val_ids = []
     
-    # Try to load from bundled file (coco_all_ids.json)
-    bundled_file = os.path.join(os.path.dirname(__file__), '..', 'service', 'coco_all_ids.json')
-    if os.path.exists(bundled_file):
+    # Try bundled file: same dir as main.py first, then ../service/ (for deployed layout)
+    _dir = os.path.dirname(os.path.abspath(__file__))
+    bundled_candidates = [
+        os.path.join(_dir, 'coco_all_ids.json'),
+        os.path.join(_dir, '..', 'service', 'coco_all_ids.json'),
+    ]
+    bundled_file = None
+    for p in bundled_candidates:
+        if os.path.exists(p):
+            bundled_file = p
+            break
+    if bundled_file:
         try:
             with open(bundled_file, 'r') as f:
                 data = json.load(f)
@@ -84,7 +94,9 @@ def get_coco_images(dataset: str = 'all'):
     
     # Fallback to old val-only file
     if not train_ids and not val_ids:
-        old_bundled = os.path.join(os.path.dirname(__file__), '..', 'service', 'coco_val2017_ids.json')
+        old_bundled = os.path.join(_dir, 'coco_val2017_ids.json')
+        if not os.path.exists(old_bundled):
+            old_bundled = os.path.join(_dir, '..', 'service', 'coco_val2017_ids.json')
         if os.path.exists(old_bundled):
             try:
                 with open(old_bundled, 'r') as f:
@@ -93,9 +105,15 @@ def get_coco_images(dataset: str = 'all'):
             except:
                 pass
     
-    # Fallback: download annotations
+    # Fallback: download annotations (~250MB, one-time; can take 5–10 min)
     if not train_ids and not val_ids:
-        logger.info("Bundled files not found, downloading annotations (~250MB)...")
+        msg = "Downloading COCO annotations (~250MB, one-time)..."
+        logger.info(f"Bundled files not found, {msg}")
+        if progress_callback:
+            try:
+                progress_callback('download_images', 'running', 15, msg)
+            except Exception:
+                pass
         try:
             url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
             response = requests.get(url, timeout=600)
@@ -2376,10 +2394,15 @@ class StressTestServer(dl.BaseServiceRunner):
         Returns:
             dict with download results
         """
-        # Get COCO image URLs if not provided
+        # Get COCO image URLs if not provided (may take several minutes if annotations must be downloaded)
         if image_urls is None:
+            if progress_callback:
+                try:
+                    progress_callback('download_images', 'running', 15, 'Preparing COCO image list (first run may download ~250MB annotations)...')
+                except Exception:
+                    pass
             logger.info(f"Fetching COCO image list (dataset={dataset}, max={max_images})...")
-            all_urls = get_coco_images(dataset=dataset)
+            all_urls = get_coco_images(dataset=dataset, progress_callback=progress_callback)
             image_urls = all_urls[:max_images]
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
