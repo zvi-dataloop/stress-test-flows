@@ -2248,6 +2248,10 @@ class StressTestServer(dl.BaseServiceRunner):
                 
                 return {'success': True, 'filename': filename, 'path': filepath, 'skipped': False}
             except Exception as e:
+                print(f"Download failed: {e}")
+                print(f"URL: {url}")
+                print(f"Error: {str(e)}")
+                print(f"Traceback: {traceback.format_exc()}")
                 return {'success': False, 'url': url, 'error': str(e)}
         
         # Download in parallel with progress logging
