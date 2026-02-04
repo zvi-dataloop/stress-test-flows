@@ -2924,7 +2924,7 @@ class ServiceRunner:
         headers = {
             "Authorization": f"Bearer {dl.token()}"
         }
-        response = requests.get(item.stream, headers=headers, timeout=30)
+        response = requests.get(item.stream, headers=headers, timeout=45)
         response.raise_for_status()
         
         image_data = io.BytesIO(response.content)
