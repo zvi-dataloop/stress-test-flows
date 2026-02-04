@@ -1,7 +1,7 @@
 {
   "name": "nginx-stress-test",
   "displayName": "Nginx Stress-Test Benchmark",
-  "version": "1.0.55",    
+  "version": "1.0.56",    
   "scope": "public",
   "attributes": {
     "Provider": "Other",
