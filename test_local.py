@@ -19,8 +19,8 @@ def main():
     print("=" * 60)
     
     # Configuration
-    PROJECT_ID = '2e3fcb12-c387-4865-9409-fa9ffb9c8997'
-    PORT = 3000
+    PROJECT_ID = 'b579922f-0b12-4c40-9dd9-2a96003160b7'
+    PORT = 3002
     
     # 1. Login
     print("\n1. Setting environment to env2 and logging in...")
@@ -34,6 +34,7 @@ def main():
     print(f"\n2. Setting environment variables...")
     os.environ['DL_PROJECT_ID'] = PROJECT_ID
     os.environ['PORT'] = str(PORT)
+    os.environ['IS_CUSTOM_SERVER'] = 'true'  # Required so StressTestServer starts the HTTP server in __init__
     os.environ['STRESS_TEST_SERVICE_ID'] = '696fab2d7ef2cb6fd8d1ad64'
     os.environ['STRESS_TEST_SERVICE_NAME'] = 'stress-test-service'
     
