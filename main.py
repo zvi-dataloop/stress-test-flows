@@ -2433,8 +2433,11 @@ class StressTestServer(dl.BaseServiceRunner):
             # Process pool: chunks of 1000, each process runs N threads (picklable worker from download_worker)
             chunks = [image_urls[i:i + DOWNLOAD_CHUNK_SIZE] for i in range(0, len(image_urls), DOWNLOAD_CHUNK_SIZE)]
             max_processes = min(DOWNLOAD_MAX_PROCESSES, len(chunks))
+            # Use a manager queue so workers can report per-item progress (picklable with spawn)
+            manager = mp.Manager()
+            progress_queue = manager.Queue()
             worker_args = [
-                (chunk, storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, num_threads)
+                (chunk, storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, num_threads, progress_queue)
                 for chunk in chunks
             ]
             try:
@@ -2443,6 +2446,30 @@ class StressTestServer(dl.BaseServiceRunner):
                 process_context = mp.get_context('spawn')
             executor = ProcessPoolExecutor(max_workers=max_processes, mp_context=process_context)
             completed = 0
+            progress_done = threading.Event()
+
+            def _progress_reader():
+                nonlocal completed
+                count = 0
+                while True:
+                    try:
+                        n = progress_queue.get()
+                    except Exception:
+                        break
+                    if n is None:
+                        break
+                    count += n
+                    if count % 50 == 0 or count >= total_images:
+                        progress_pct = (count / total_images) * 100 if total_images else 0
+                        progress_msg = f"Progress: {count}/{total_images} ({progress_pct:.1f}%)"
+                        logger.info(progress_msg)
+                        if progress_callback:
+                            overall_progress = 15 + (progress_pct / 100) * 25
+                            progress_callback('download_images', 'running', overall_progress, progress_msg)
+                progress_done.set()
+
+            reader_thread = Thread(target=_progress_reader, daemon=False)
+            reader_thread.start()
             try:
                 future_to_chunk = {executor.submit(_run_download_chunk, a): a for a in worker_args}
                 for future in as_completed(future_to_chunk):
@@ -2462,14 +2489,20 @@ class StressTestServer(dl.BaseServiceRunner):
                     except Exception as e:
                         logger.exception(f"Chunk failed: {e}")
                         completed += len(future_to_chunk[future][0])
-                    if completed % 50 == 0 or completed == total_images:
-                        progress_pct = (completed / total_images) * 100 if total_images else 0
-                        progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
-                        logger.info(progress_msg)
-                        if progress_callback:
-                            overall_progress = 15 + (progress_pct / 100) * 25
-                            progress_callback('download_images', 'running', overall_progress, progress_msg)
+                    # Chunk-level update with exact counts (reader thread handles smooth per-item progress)
+                    progress_pct = (completed / total_images) * 100 if total_images else 0
+                    progress_msg = f"Progress: {completed}/{total_images} ({progress_pct:.1f}%) - New: {len(downloaded)}, Skipped: {len(skipped)}, Failed: {len(failed)}"
+                    logger.info(progress_msg)
+                    if progress_callback:
+                        overall_progress = 15 + (progress_pct / 100) * 25
+                        progress_callback('download_images', 'running', overall_progress, progress_msg)
             finally:
+                try:
+                    progress_queue.put(None)
+                except Exception:
+                    pass
+                progress_done.wait(timeout=10)
+                reader_thread.join(timeout=5)
                 executor.shutdown(wait=not _is_cancelled())
         else:
             # Thread pool only (no pickle; works when download_worker is not in the package)
@@ -3021,8 +3054,8 @@ class StressTestServer(dl.BaseServiceRunner):
                     installed_dpk_name = dpk_to_install.name
                     logger.info(f"Using DPK name: {installed_dpk_name} for pipeline node")
                     
-                    # Wait a bit for the model to be created
-                    logger.info("Waiting 5 seconds for model to be initialized...")
+                    # Give DPK a moment to start creating the model (Step 2 will poll for up to 3 min)
+                    logger.info("Waiting 5 seconds for DPK to start model creation...")
                     time.sleep(5)
                         
                 except Exception as e:
@@ -3048,24 +3081,34 @@ class StressTestServer(dl.BaseServiceRunner):
         
         logger.info(f"Using app: {app.name} (ID: {app.id}, dpk_name: {installed_dpk_name})")
         
-        # Step 2: Get the model from the installed app
+        # Step 2: Get the model from the installed app (DPK creates it asynchronously; poll with retries)
         logger.info("Step 2: Getting model from project...")
         model = None
+        models = []
         try:
-            logger.info("Listing models in project (this may take a moment)...")
-            models = list(project.models.list().all())
-            logger.info(f"Found {len(models)} models in project")
-            for m in models:
-                logger.info(f"  - Model: {m.name} (ID: {m.id})")
-                if 'resnet' in m.name.lower():
-                    model = m
-                    logger.info(f"Using model: {model.name} (ID: {model.id})")
+            max_wait_sec = 180  # 3 minutes total
+            poll_interval = 10
+            attempts = max(1, max_wait_sec // poll_interval)
+            for attempt in range(attempts):
+                logger.info("Listing models in project (this may take a moment)...")
+                models = list(project.models.list().all())
+                logger.info(f"Found {len(models)} models in project")
+                for m in models:
+                    logger.info(f"  - Model: {m.name} (ID: {m.id})")
+                    if 'resnet' in m.name.lower():
+                        model = m
+                        logger.info(f"Using model: {model.name} (ID: {model.id})")
+                        break
+                if model is not None:
                     break
-            
+                if attempt < attempts - 1:
+                    logger.info(f"ResNet model not found yet. Waiting {poll_interval}s before retry ({attempt + 1}/{attempts})...")
+                    time.sleep(poll_interval)
+
             if model is None:
-                logger.error("No ResNet model found in project!")
+                logger.error("No ResNet model found in project after waiting.")
                 return {
-                    'error': 'No ResNet model found. DPK may not have installed correctly.',
+                    'error': 'No ResNet model found. DPK may not have installed correctly, or the model is still being created. Install the ResNet DPK from the marketplace first and wait a few minutes, then retry.',
                     'models_found': [m.name for m in models],
                     'app_id': app.id if app else None
                 }

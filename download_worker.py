@@ -55,13 +55,16 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
 def run_download_chunk(args):
     """
     Entry point for process pool: download a chunk of URLs and create link items when requested.
-    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str, workflow_id, create_link, threads_per_process)
+    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str, workflow_id, create_link, threads_per_process [, progress_queue])
+    progress_queue: optional; when provided, put(1) per completed item so main process can show accurate progress.
     Returns: (downloaded, failed, skipped, error_str or None)
     """
     log = logging.getLogger('stress-test-server')
     try:
+        parts = list(args)
+        progress_queue = parts.pop() if len(parts) == 10 else None
         (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str,
-         workflow_id, create_link, threads_per_process) = args
+         workflow_id, create_link, threads_per_process) = parts
         cancel_file = f"/tmp/stress_cancel_{workflow_id}" if workflow_id else None
 
         def _is_cancelled():
@@ -116,6 +119,11 @@ def run_download_chunk(args):
                         downloaded.append(result)
                 else:
                     failed.append(result)
+                if progress_queue is not None:
+                    try:
+                        progress_queue.put(1)
+                    except Exception:
+                        pass
         return (downloaded, failed, skipped, None)
     except Exception as e:
         log.exception("Worker chunk failed with exception")
