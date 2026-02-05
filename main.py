@@ -349,6 +349,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         elif path.startswith('/api/workflow-progress/'):
             workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
             self._get_workflow_progress(workflow_id)
+        elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
+            self._get_active_workflow()
         elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
             self._list_gcs_integrations()
         elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
@@ -890,17 +892,39 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             if workflow_id not in workflow_progress:
                 self._send_error(404, f'Workflow {workflow_id} not found')
                 return
-            
+
             progress = workflow_progress[workflow_id].copy()
             # Calculate elapsed time
             if 'started_at' in progress:
                 progress['elapsed_time'] = time.time() - progress['started_at']
-            
+
             self._send_json(progress)
         except Exception as e:
             logger.error(f"Get workflow progress error: {e}", exc_info=True)
             self._send_error(500, str(e))
-    
+
+    def _get_active_workflow(self):
+        """Return whether a test is currently running and its workflow_id so other users can attach and see logs."""
+        try:
+            global workflow_progress, _stress_test_server_instance
+            # Prefer current workflow from server instance (the one actually running)
+            wf_id = getattr(_stress_test_server_instance, '_current_workflow_id', None) if _stress_test_server_instance else None
+            if wf_id and wf_id in workflow_progress:
+                status = workflow_progress[wf_id].get('status', '')
+                if status not in ('completed', 'failed', 'cancelled'):
+                    self._send_json({'running': True, 'workflow_id': wf_id})
+                    return
+            # Else scan for any running/starting/cancelling workflow
+            for wid, prog in workflow_progress.items():
+                status = prog.get('status', '')
+                if status in ('running', 'starting', 'cancelling'):
+                    self._send_json({'running': True, 'workflow_id': wid})
+                    return
+            self._send_json({'running': False})
+        except Exception as e:
+            logger.error(f"Get active workflow error: {e}", exc_info=True)
+            self._send_json({'running': False})
+
     def _run_workflow_async(self, workflow_id, max_images, dataset_id_param, project_id_param,
                            dataset_name, driver_id, pipeline_name, num_workers, coco_dataset,
                            create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
@@ -3251,7 +3275,7 @@ class ServiceRunner:
         headers = {
             "Authorization": f"Bearer {dl.token()}"
         }
-        response = requests.get(item.stream, headers=headers, timeout=30)
+        response = requests.get(item.stream, headers=headers, timeout=55)
         response.raise_for_status()
         
         image_data = io.BytesIO(response.content)

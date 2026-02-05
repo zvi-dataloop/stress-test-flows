@@ -368,11 +368,11 @@
         function restoreWorkflow(workflowId) {
             const saved = loadWorkflowProgress(workflowId);
             if (!saved) return false;
-            
+
             // Restore UI state
             updateProgress(saved.progress_pct || 0);
             updateStatus(saved.status || 'unknown', saved.current_step || '');
-            
+
             // Restore logs
             clearLogs();
             if (saved.logs && saved.logs.length > 0) {
@@ -382,7 +382,7 @@
                     addLog(`${step ? `[${step}] ` : ''}${log.message}`, level, step);
                 });
             }
-            
+
             // If workflow is still running, resume polling
             if (saved.status === 'running' || saved.status === 'unknown') {
                 addLog(`🔄 Resuming workflow monitoring...`, 'info');
@@ -391,8 +391,57 @@
             } else {
                 addLog(`📋 Loaded saved workflow result (${saved.status})`, 'info');
             }
-            
+
             return true;
+        }
+
+        // Attach to an active workflow from the server (for users who didn't start the test - no localStorage).
+        // Fetches current progress, displays all logs, and starts polling so they see the same as the initiator.
+        async function attachToActiveWorkflow(workflowId) {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/workflow-progress/${workflowId}`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (!response.ok) return false;
+                const progress = await response.json();
+                const status = progress.status || 'unknown';
+                const progressPct = progress.progress_pct || 0;
+                const currentStep = progress.current_step || '';
+
+                updateProgress(progressPct);
+                updateStatus(status, currentStep);
+                clearLogs();
+                if (progress.logs && progress.logs.length > 0) {
+                    replaceLogsWith(progress.logs);
+                }
+                addLog(`📋 Attached to running test (workflow ${workflowId.slice(0, 8)}…). Showing all logs and polling.`, 'info');
+                saveWorkflowProgress(workflowId, progress);
+                currentWorkflowId = workflowId;
+
+                const stillRunning = ['running', 'starting', 'cancelling', 'unknown'].includes(status);
+                if (stillRunning) {
+                    isRunning = true;
+                    const runBtn = document.getElementById('runAllBtn');
+                    if (runBtn) {
+                        runBtn.disabled = true;
+                        runBtn.textContent = '⏳ Running...';
+                    }
+                    const cancelBtn = document.getElementById('cancelBtn');
+                    if (cancelBtn) {
+                        cancelBtn.style.display = 'inline-flex';
+                        cancelBtn.disabled = false;
+                    }
+                    window._pollingWorkflowId = workflowId;
+                    pollWorkflowProgress(workflowId);
+                } else {
+                    addLog(`📋 Workflow already finished (${status})`, 'info');
+                }
+                return true;
+            } catch (e) {
+                console.error('attachToActiveWorkflow error:', e);
+                return false;
+            }
         }
         
         // Clear saved workflows
@@ -1048,8 +1097,30 @@
             } catch (error) {
                 addLog('⚠️ Could not connect to DPK server', 'warning');
             }
+
+            // On load: verify if a test is already running on the server (e.g. another user started it).
+            // If yes, attach to it and poll so this user sees the same logs as everyone else.
+            try {
+                const activeRes = await fetch(`${API_BASE_URL}/api/active-workflow`, {
+                    method: 'GET',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                if (activeRes.ok) {
+                    const active = await activeRes.json();
+                    if (active.running && active.workflow_id) {
+                        addLog('🔗 A test is already running on the server. Attaching to view logs...', 'info');
+                        const attached = await attachToActiveWorkflow(active.workflow_id);
+                        if (attached) {
+                            // Done: we are now polling and showing logs; skip localStorage restore
+                            return;
+                        }
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to check active workflow:', e);
+            }
             
-            // Restore workflow from localStorage
+            // Restore workflow from localStorage (same browser had started or viewed a workflow before)
             try {
                 const savedWorkflowId = localStorage.getItem('stress_test_current_workflow');
                 if (savedWorkflowId) {
