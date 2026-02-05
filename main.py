@@ -2960,6 +2960,7 @@ class StressTestServer(dl.BaseServiceRunner):
                             
                             # Merge runtime config with existing runtime if it exists
                             new_runtime = {
+                                "podType": "regular-m",
                                 'concurrency': 30,
                                 'autoscaler': {
                                     'type': 'rabbitmq',
