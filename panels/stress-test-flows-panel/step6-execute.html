@@ -306,6 +306,61 @@
             </div>
         </div>
 
+        <!-- Pipeline execution summary (success / failed / in progress) -->
+        <div class="card" id="pipelineStatsCard">
+            <h2>Pipeline execution summary</h2>
+            <p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 14px;">Execution counts for the pipeline: how many items finished successfully, failed, or are still in progress. Enter the pipeline ID from your last run or from the workflow result.</p>
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;">
+                <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Pipeline ID:</label>
+                <input type="text" id="pipelineStatsPipelineId" placeholder="Paste pipeline ID (from workflow result or console)" style="flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; font-family: monospace;">
+                <button type="button" class="btn btn-primary" id="pipelineStatsLoadBtn" style="padding: 8px 20px;">Load stats</button>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                    <input type="checkbox" id="pipelineStatsLive" checked>
+                    Live (refresh every 15s)
+                </label>
+            </div>
+            <div id="pipelineStatsError" style="display: none; padding: 12px; background: rgba(239,68,68,0.1); border-radius: 8px; color: var(--accent-danger); font-size: 13px; margin-bottom: 12px;"></div>
+            <div id="pipelineStatsContent" style="display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px;">
+                    <div class="pipeline-stat-box" style="background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-success); margin-bottom: 4px;">Success</div>
+                        <div id="pipelineStatSuccess" style="font-size: 28px; font-weight: 800; color: var(--accent-success);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-danger); margin-bottom: 4px;">Failed</div>
+                        <div id="pipelineStatFailed" style="font-size: 28px; font-weight: 800; color: var(--accent-danger);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-warning); margin-bottom: 4px;">In progress</div>
+                        <div id="pipelineStatInProgress" style="font-size: 28px; font-weight: 800; color: var(--accent-warning);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 4px;">Total completed</div>
+                        <div id="pipelineStatCompleted" style="font-size: 28px; font-weight: 800; color: var(--text-primary);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(14,165,233,0.12); border: 1px solid rgba(14,165,233,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-primary); margin-bottom: 4px;">Time taken</div>
+                        <div id="pipelineStatDuration" style="font-size: 22px; font-weight: 800; color: var(--accent-primary);">—</div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
+                    <div style="flex: 0 0 220px;">
+                        <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">By status</div>
+                        <canvas id="pipelineStatsChart" style="max-width: 220px; max-height: 220px;"></canvas>
+                    </div>
+                    <div style="flex: 1; min-width: 200px;">
+                        <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">Summary</div>
+                        <p id="pipelineStatsSummary" style="font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin: 0;"></p>
+                        <p id="pipelineStatsUpdated" style="font-size: 11px; color: var(--text-muted); margin-top: 8px;"></p>
+                    </div>
+                </div>
+                <div id="pipelineStatsNodesSection" style="margin-top: 24px; display: none;">
+                    <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 12px;">Executions per pipeline node (successful, failed, in progress)</div>
+                    <div id="pipelineStatsNodes" style="display: grid; gap: 12px;"></div>
+                </div>
+            </div>
+        </div>
+
         <div class="nav-buttons">
             <a href="step5-pipeline.html" class="btn btn-secondary">← Back to Pipeline</a>
             <a href="index.html" class="btn btn-primary">Back to Overview →</a>
@@ -998,6 +1053,11 @@
                         lastLogCount = logs.length;
                     }
                     
+                    // Auto-fill pipeline ID in execution summary when result has pipeline_id (e.g. after create_pipeline step)
+                    if (progress.result && typeof window.tryFillPipelineIdFromWorkflow === 'function') {
+                        window.tryFillPipelineIdFromWorkflow(progress);
+                    }
+                    
                     // Check if workflow is complete, cancelled, or cancelling
                     if (status === 'completed' || status === 'cancelled' || status === 'cancelling') {
                         // Clear batch progress line when workflow completes
@@ -1296,6 +1356,160 @@
         loadNginxRpsChart();
         startNginxRpsPolling();
         window.addEventListener('beforeunload', stopNginxRpsPolling);
+
+        // Pipeline execution summary (success / failed / in progress)
+        const PIPELINE_STATS_POLL_MS = 15000;
+        let pipelineStatsChartInstance = null;
+        let pipelineStatsPollTimerId = null;
+        function loadPipelineExecutionStats() {
+            const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
+            const pipelineId = (pipelineIdInput && pipelineIdInput.value) ? pipelineIdInput.value.trim() : '';
+            const errorEl = document.getElementById('pipelineStatsError');
+            const contentEl = document.getElementById('pipelineStatsContent');
+            if (!pipelineId) {
+                if (errorEl) { errorEl.style.display = 'none'; }
+                if (contentEl) { contentEl.style.display = 'none'; }
+                return;
+            }
+            if (errorEl) { errorEl.style.display = 'none'; }
+            fetch(`${API_BASE_URL}/api/pipeline-execution-stats?pipeline_id=${encodeURIComponent(pipelineId)}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        if (errorEl) {
+                            errorEl.textContent = data.error;
+                            errorEl.style.display = 'block';
+                        }
+                        if (contentEl) contentEl.style.display = 'none';
+                        return;
+                    }
+                    if (contentEl) contentEl.style.display = 'block';
+                    const success = data.success || 0;
+                    const failed = data.failed || 0;
+                    const inProgress = data.in_progress || 0;
+                    const completed = data.completed || (success + failed);
+                    const total = data.total || (completed + inProgress) || 1;
+                    const durationSeconds = data.duration_seconds;
+                    const nodes = data.nodes || [];
+                    document.getElementById('pipelineStatSuccess').textContent = success.toLocaleString();
+                    document.getElementById('pipelineStatFailed').textContent = failed.toLocaleString();
+                    document.getElementById('pipelineStatInProgress').textContent = inProgress.toLocaleString();
+                    document.getElementById('pipelineStatCompleted').textContent = completed.toLocaleString();
+                    function formatDuration(sec) {
+                        if (sec == null || sec < 0) return '—';
+                        if (sec < 60) return sec + 's';
+                        const m = Math.floor(sec / 60);
+                        const s = sec % 60;
+                        if (m < 60) return s > 0 ? m + 'm ' + s + 's' : m + 'm';
+                        const h = Math.floor(m / 60);
+                        const mm = m % 60;
+                        return mm > 0 ? h + 'h ' + mm + 'm' : h + 'h';
+                    }
+                    document.getElementById('pipelineStatDuration').textContent = formatDuration(durationSeconds);
+                    const pctDone = total > 0 ? Math.round((completed / total) * 100) : 0;
+                    const successPct = completed > 0 ? Math.round((success / completed) * 100) : 0;
+                    document.getElementById('pipelineStatsSummary').innerHTML =
+                        `<strong>${completed.toLocaleString()}</strong> of <strong>${total.toLocaleString()}</strong> items completed (${pctDone}%). ` +
+                        (completed > 0 ? `<strong>${successPct}%</strong> of completed items succeeded. ` : '') +
+                        (durationSeconds != null ? `Time taken: <strong>${formatDuration(durationSeconds)}</strong>. ` : '') +
+                        (inProgress > 0 ? `<strong>${inProgress.toLocaleString()}</strong> items still in progress.` : 'All items have finished.');
+                    const now = new Date();
+                    document.getElementById('pipelineStatsUpdated').textContent = 'Last updated ' + now.toLocaleTimeString();
+                    const nodesSection = document.getElementById('pipelineStatsNodesSection');
+                    const nodesContainer = document.getElementById('pipelineStatsNodes');
+                    if (nodes.length > 0) {
+                        nodesSection.style.display = 'block';
+                        nodesContainer.innerHTML = nodes.map(function(n) {
+                            const s = n.success || 0, f = n.failed || 0, p = n.in_progress || 0;
+                            const summary = s.toLocaleString() + ' successful, ' + f.toLocaleString() + ' failed, ' + p.toLocaleString() + ' in progress';
+                            return '<div style="display: grid; grid-template-columns: minmax(120px, auto) 1fr 1fr 1fr; gap: 12px; align-items: center; padding: 12px 16px; background: var(--bg-tertiary); border-radius: 10px; border: 1px solid var(--border-color);">' +
+                                '<div><span style="font-weight: 600; color: var(--text-primary);">' + (n.node_name || n.node_id || 'Node') + '</span><br><span style="font-size: 11px; color: var(--text-muted);">' + summary + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">Successful executions</span><br><span style="color: var(--accent-success); font-weight: 700;">' + s.toLocaleString() + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">Failed</span><br><span style="color: var(--accent-danger); font-weight: 700;">' + f.toLocaleString() + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">In progress</span><br><span style="color: var(--accent-warning); font-weight: 700;">' + p.toLocaleString() + '</span></div>' +
+                                '</div>';
+                        }).join('');
+                    } else {
+                        nodesSection.style.display = 'none';
+                    }
+                    const canvas = document.getElementById('pipelineStatsChart');
+                    if (canvas && typeof Chart !== 'undefined') {
+                        if (pipelineStatsChartInstance) pipelineStatsChartInstance.destroy();
+                        const hasAny = success > 0 || failed > 0 || inProgress > 0;
+                        pipelineStatsChartInstance = new Chart(canvas, {
+                            type: 'doughnut',
+                            data: {
+                                labels: ['Success', 'Failed', 'In progress'],
+                                datasets: [{
+                                    data: hasAny ? [success, failed, inProgress] : [1],
+                                    backgroundColor: hasAny ? ['#10b981', '#ef4444', '#f59e0b'] : ['#e2e8f0'],
+                                    borderWidth: 0
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: true,
+                                plugins: {
+                                    legend: { position: 'bottom' }
+                                },
+                                cutout: '55%'
+                            }
+                        });
+                    }
+                })
+                .catch(e => {
+                    if (errorEl) {
+                        errorEl.textContent = 'Failed to load: ' + e.message;
+                        errorEl.style.display = 'block';
+                    }
+                    if (contentEl) contentEl.style.display = 'none';
+                });
+        }
+        function startPipelineStatsPolling() {
+            if (pipelineStatsPollTimerId) return;
+            const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
+            if (!(pipelineIdInput && pipelineIdInput.value && pipelineIdInput.value.trim())) return;
+            pipelineStatsPollTimerId = setInterval(loadPipelineExecutionStats, PIPELINE_STATS_POLL_MS);
+        }
+        function stopPipelineStatsPolling() {
+            if (pipelineStatsPollTimerId) {
+                clearInterval(pipelineStatsPollTimerId);
+                pipelineStatsPollTimerId = null;
+            }
+        }
+        const pipelineStatsLoadBtn = document.getElementById('pipelineStatsLoadBtn');
+        if (pipelineStatsLoadBtn) pipelineStatsLoadBtn.addEventListener('click', function() {
+            loadPipelineExecutionStats();
+            if (document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+        });
+        const pipelineStatsLiveCheckbox = document.getElementById('pipelineStatsLive');
+        if (pipelineStatsLiveCheckbox) {
+            pipelineStatsLiveCheckbox.addEventListener('change', function() {
+                if (this.checked) startPipelineStatsPolling(); else stopPipelineStatsPolling();
+            });
+        }
+        window.addEventListener('beforeunload', stopPipelineStatsPolling);
+
+        // Auto-fill pipeline_id from current workflow result when progress is received
+        function tryFillPipelineIdFromWorkflow(progress) {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            if (!input || input.value.trim()) return;
+            const result = progress && progress.result;
+            if (!result || typeof result !== 'object') return;
+            let pipelineId = result.pipeline_id;
+            if (!pipelineId && result.steps && Array.isArray(result.steps)) {
+                const createStep = result.steps.find(s => s && s.step === 'create_pipeline');
+                if (createStep && createStep.result && createStep.result.pipeline_id)
+                    pipelineId = createStep.result.pipeline_id;
+            }
+            if (pipelineId) {
+                input.value = pipelineId;
+                loadPipelineExecutionStats();
+                if (pipelineStatsLiveCheckbox && pipelineStatsLiveCheckbox.checked) startPipelineStatsPolling();
+            }
+        }
+        // Expose for progress polling to call when workflow has pipeline_id
+        window.tryFillPipelineIdFromWorkflow = tryFillPipelineIdFromWorkflow;
     </script>
 </body>
 </html>

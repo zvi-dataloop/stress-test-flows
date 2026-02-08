@@ -373,6 +373,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
             # Pass full path with query string so range/step params are available
             self._get_nginx_rps_metrics(self.path)
+        elif path == '/api/pipeline-execution-stats' or path.startswith('/api/pipeline-execution-stats'):
+            self._get_pipeline_execution_stats(self.path)
         else:
             # Handle static file paths
             # Ensure root path serves index.html
@@ -656,6 +658,198 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             logger.error(f"Nginx RPS metrics error: {e}", exc_info=True)
             self._send_json({'2xx': [], '4xx': [], '5xx': [], 'error': str(e)})
+    
+    def _get_pipeline_execution_stats(self, path):
+        """GET /api/pipeline-execution-stats?pipeline_id=xxx - return execution counts (success, failed, in_progress), duration, and per-node stats."""
+        try:
+            parsed = urlparse(path)
+            qs = parse_qs(parsed.query or '')
+            pipeline_id = (qs.get('pipeline_id') or [None])[0] if qs.get('pipeline_id') else None
+            if not pipeline_id or not pipeline_id.strip():
+                self._send_json({'error': 'pipeline_id is required', 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
+                return
+            pipeline_id = pipeline_id.strip()
+            headers = {'Authorization': f'Bearer {dl.token()}'}
+            base_url = (dl.environment() or '').strip().rstrip('/')
+            if not base_url:
+                self._send_json({'error': 'Could not determine API base URL', 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
+                return
+            # 1) Get pipeline details for node list
+            nodes_list = []
+            try:
+                pipe_response = requests.get(f"{base_url}/pipelines/{pipeline_id}", headers=headers, timeout=10)
+                if pipe_response.status_code == 200:
+                    pipe_data = pipe_response.json()
+                    for n in pipe_data.get('nodes') or pipe_data.get('composition', {}).get('nodes') or []:
+                        node_id = n.get('id') or n.get('nodeId') or ''
+                        node_name = n.get('name') or n.get('displayName') or node_id or 'Unknown'
+                        nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': 0, 'failed': 0, 'in_progress': 0})
+            except Exception as e:
+                logger.debug(f"Could not fetch pipeline nodes: {e}")
+            # 2) Get pipeline statistics
+            stats_response = requests.get(
+                f"{base_url}/pipelines/{pipeline_id}/statistics",
+                headers=headers,
+                timeout=15
+            )
+            if stats_response.status_code != 200:
+                err = stats_response.text[:200] if stats_response.text else f'HTTP {stats_response.status_code}'
+                self._send_json({'error': err, 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': nodes_list, 'duration_seconds': None, 'pipeline_id': pipeline_id})
+                return
+            pipeline_stats = stats_response.json()
+            execution_counters = pipeline_stats.get('pipelineExecutionCounters', [])
+            success_count = 0
+            failed_count = 0
+            in_progress_count = 0
+            for counter in execution_counters:
+                status = (counter.get('status') or '').lower()
+                count = int(counter.get('count', 0))
+                if status == 'success':
+                    success_count = count
+                elif status == 'failed':
+                    failed_count = count
+                elif status in ('in-progress', 'inprogress', 'running', 'pending'):
+                    in_progress_count = count
+            # Per-node counters if present (e.g. nodeExecutionCounters)
+            node_counters = pipeline_stats.get('nodeExecutionCounters') or pipeline_stats.get('nodes') or []
+            if isinstance(node_counters, list) and node_counters:
+                for nc in node_counters:
+                    node_id = nc.get('nodeId') or nc.get('node_id') or nc.get('id') or ''
+                    node_name = nc.get('nodeName') or nc.get('node_name') or nc.get('name') or node_id
+                    ns, nf, np = 0, 0, 0
+                    for c in (nc.get('counters') or nc.get('executionCounters') or [nc]):
+                        st = (c.get('status') or '').lower()
+                        cnt = int(c.get('count', 0))
+                        if st == 'success': ns = cnt
+                        elif st == 'failed': nf = cnt
+                        elif st in ('in-progress', 'inprogress', 'running', 'pending'): np = cnt
+                    existing = next((n for n in nodes_list if n.get('node_id') == node_id), None)
+                    if existing:
+                        existing['success'] = ns
+                        existing['failed'] = nf
+                        existing['in_progress'] = np
+                    else:
+                        nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': ns, 'failed': nf, 'in_progress': np})
+            completed = success_count + failed_count
+            total = completed + in_progress_count
+            # If API didn't return per-node counters, each node sees the same pipeline totals (each item passes through every node)
+            if nodes_list and not any(n.get('success') or n.get('failed') or n.get('in_progress') for n in nodes_list):
+                for n in nodes_list:
+                    n['success'] = success_count
+                    n['failed'] = failed_count
+                    n['in_progress'] = in_progress_count
+            # 3) Duration: first execution to last (use raw API so we get JSON dates reliably)
+            duration_seconds = None
+            def _parse_ts(v):
+                if v is None:
+                    return None
+                if hasattr(v, 'timestamp'):
+                    return v.timestamp()
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        import datetime
+                        s = v.replace('Z', '+00:00').replace(' ', 'T')
+                        dt = datetime.datetime.fromisoformat(s)
+                        return dt.timestamp()
+                    except Exception:
+                        pass
+                return None
+            def _get_ts(obj, *keys):
+                for k in keys:
+                    v = getattr(obj, k, None) if hasattr(obj, k) else (obj.get(k) if isinstance(obj, dict) else None)
+                    t = _parse_ts(v)
+                    if t is not None:
+                        return t
+                return None
+            project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            if not project_id and pipe_response and pipe_response.status_code == 200:
+                project_id = pipe_data.get('projectId') or pipe_data.get('project_id')
+            if project_id:
+                t0_raw, t1_raw = None, None
+                # Pipeline runs are listed via POST /pipelines/query (pipeline executions), not project executions
+                try:
+                    query_url = f"{base_url}/pipelines/query"
+                    body_first = {
+                        "resource": "pipelineState",
+                        "filter": {"$and": [{"pipelineId": pipeline_id}]},
+                        "sort": {"createdAt": "ascending"},
+                        "page": 0,
+                        "pageSize": 1,
+                    }
+                    r_first = requests.post(query_url, headers=headers, json=body_first, timeout=15)
+                    if r_first.status_code == 200:
+                        data = r_first.json()
+                        items = data.get("items") or data.get("data", {}).get("items") or []
+                        if items and isinstance(items[0], dict):
+                            t0_raw = _get_ts(items[0], "createdAt", "created_at")
+                    body_last = {
+                        "resource": "pipelineState",
+                        "filter": {"$and": [{"pipelineId": pipeline_id}]},
+                        "sort": {"createdAt": "descending"},
+                        "page": 0,
+                        "pageSize": 1,
+                    }
+                    r_last = requests.post(query_url, headers=headers, json=body_last, timeout=15)
+                    if r_last.status_code == 200:
+                        data = r_last.json()
+                        items = data.get("items") or data.get("data", {}).get("items") or []
+                        if items and isinstance(items[0], dict):
+                            t1_raw = _get_ts(items[0], "updatedAt", "updated_at", "createdAt", "created_at")
+                    if t0_raw is not None and t1_raw is not None:
+                        duration_seconds = max(0, int(t1_raw - t0_raw))
+                        logger.info(f"Pipeline {pipeline_id} duration: {duration_seconds}s (from pipelines/query)")
+                except Exception as e:
+                    logger.debug(f"Duration from pipelines/query: {e}")
+                if duration_seconds is None:
+                    try:
+                        project = dl.projects.get(project_id=project_id)
+                        pipeline = project.pipelines.get(pipeline_id=pipeline_id)
+                        filters_asc = dl.Filters(resource=dl.FiltersResource.PIPELINE_EXECUTION)
+                        filters_asc.add(field="pipelineId", values=pipeline_id)
+                        filters_asc.sort_by(field="createdAt", value=dl.FiltersOrderByDirection.ASCENDING)
+                        first_page = pipeline.pipeline_executions.list(filters=filters_asc, page_size=1)
+                        filters_desc = dl.Filters(resource=dl.FiltersResource.PIPELINE_EXECUTION)
+                        filters_desc.add(field="pipelineId", values=pipeline_id)
+                        filters_desc.sort_by(field="createdAt", value=dl.FiltersOrderByDirection.DESCENDING)
+                        last_page = pipeline.pipeline_executions.list(filters=filters_desc, page_size=1)
+                        first_exec = first_page.items[0] if first_page.items else None
+                        last_exec = last_page.items[0] if last_page.items else None
+                        if first_exec and last_exec:
+                            first_json = first_exec.to_json() if hasattr(first_exec, "to_json") else (getattr(first_exec, "_json", None) or first_exec)
+                            last_json = last_exec.to_json() if hasattr(last_exec, "to_json") else (getattr(last_exec, "_json", None) or last_exec)
+                            t0 = _get_ts(first_json or first_exec, "createdAt", "created_at")
+                            t1 = _get_ts(last_json or last_exec, "updatedAt", "updated_at", "createdAt", "created_at")
+                            if t0 is not None and t1 is not None:
+                                duration_seconds = max(0, int(t1 - t0))
+                                logger.info(f"Pipeline {pipeline_id} duration: {duration_seconds}s (from SDK pipeline_executions)")
+                    except Exception as e:
+                        logger.debug(f"Duration from SDK pipeline_executions: {e}")
+            self._send_json({
+                'pipeline_id': pipeline_id,
+                'success': success_count,
+                'failed': failed_count,
+                'in_progress': in_progress_count,
+                'completed': completed,
+                'total': total if total > 0 else (success_count + failed_count + in_progress_count),
+                'duration_seconds': duration_seconds,
+                'nodes': nodes_list,
+                'error': None
+            })
+        except Exception as e:
+            logger.error(f"Pipeline execution stats error: {e}", exc_info=True)
+            self._send_json({
+                'error': str(e),
+                'success': 0,
+                'failed': 0,
+                'in_progress': 0,
+                'completed': 0,
+                'total': 0,
+                'duration_seconds': None,
+                'nodes': [],
+                'pipeline_id': None
+            })
     
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
@@ -1695,6 +1889,7 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("  POST /api/run-full            - Run full workflow (returns workflow_id)")
         logger.info("  GET  /api/workflow-progress/<workflow_id> - Get workflow progress (real-time)")
         logger.info("  GET  /api/nginx-rps - Nginx RPS metrics from Prometheus (2xx, 4xx, 5xx)")
+        logger.info("  GET  /api/pipeline-execution-stats?pipeline_id= - Pipeline execution counts (success, failed, in progress)")
         logger.info("  GET  /api/logs/<execution_id> - Get execution logs")
         logger.info("  GET  /api/execution/<execution_id> - Get execution status")
         
