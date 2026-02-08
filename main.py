@@ -154,21 +154,34 @@ DOWNLOAD_THREADS_PER_PROCESS = 32
 DOWNLOAD_MAX_PROCESSES = 32
 
 
-def _remote_path_from_link_base_url(link_base_url: str) -> str:
+def _path_inside_storage_from_link_base_url(link_base_url: str) -> str:
     """
-    Derive dataset remote path from Link Base URL so it matches the URL path.
-    No date directory: reuse existing downloads from any day.
-    E.g. http://host/s/pd_datfs2/stress-test2 -> /stress-test2
-    Falls back to /stress-test if path cannot be derived.
+    Extract path-inside-storage from Link Base URL. Link URL = serve-agent path + path inside storage.
+    Strips leading 'serve-agent/' if present so storage path matches the path inside storage.
+    E.g. https://my-domain.ai/serve-agent/root-folder/subfolder -> root-folder/subfolder
+         http://34.140.193.179/root-folder/subfolder -> root-folder/subfolder
     """
     if not link_base_url:
-        return '/stress-test'
+        return ''
     parsed = urlparse(link_base_url)
     path = (parsed.path or '').strip('/')
     if not path:
+        return ''
+    if path.startswith('serve-agent/'):
+        path = path[len('serve-agent/'):].lstrip('/')
+    return path
+
+
+def _remote_path_from_link_base_url(link_base_url: str) -> str:
+    """
+    Derive dataset remote path from Link Base URL (path inside storage; last segment as folder).
+    E.g. .../serve-agent/root-folder/subfolder -> /subfolder; .../root-folder -> /root-folder
+    Falls back to /stress-test if path cannot be derived.
+    """
+    path_inside = _path_inside_storage_from_link_base_url(link_base_url)
+    if not path_inside:
         return '/stress-test'
-    # Use last path segment as folder name (e.g. stress-test2 from .../pd_datfs2/stress-test2)
-    parts = [p for p in path.split('/') if p]
+    parts = [p for p in path_inside.split('/') if p]
     folder = parts[-1] if parts else 'stress-test'
     return f'/{folder}'
 
@@ -176,18 +189,15 @@ def _remote_path_from_link_base_url(link_base_url: str) -> str:
 def _storage_path_from_link_base_url(link_base_url: str):
     """
     Derive filesystem storage path for download from Link Base URL.
-    No date directory: if already downloaded (e.g. yesterday), we reuse those files.
-    E.g. http://host/s/pd_datfs2/stress-test2 -> /s/pd_datfs2/stress-test2
+    Link URL = serve-agent path + path inside storage; we use path inside storage (strip serve-agent/).
+    E.g. https://my-domain.ai/serve-agent/root-folder/subfolder -> /root-folder/subfolder
+         http://34.140.193.179/root-folder/subfolder -> /root-folder/subfolder
     Returns None if link_base_url is missing (caller should use default storage_path).
     """
-    if not link_base_url:
+    path_inside = _path_inside_storage_from_link_base_url(link_base_url)
+    if not path_inside:
         return None
-    parsed = urlparse(link_base_url)
-    path = (parsed.path or '').strip('/')
-    if not path:
-        return None
-    base = '/' + path if not path.startswith('/') else path
-    return base
+    return '/' + path_inside if not path_inside.startswith('/') else path_inside
 
 
 def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, overwrite: bool = True):
@@ -790,7 +800,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "pipelineMaxReplicas": 12,  # or "pipeline_max_replicas" - default for both nodes when per-node not set
             "streamImageConcurrency": 30,  # or "stream_image_concurrency" - code node (stream-image)
             "streamImageMaxReplicas": 12,  # or "stream_image_max_replicas"
-            "resnetConcurrency": 30,  # or "resnet_concurrency" - ResNet model node
+            "resnetConcurrency": 10,  # or "resnet_concurrency" - ResNet model node (default 10)
             "resnetMaxReplicas": 12,  # or "resnet_max_replicas"
             "cocoDataset": "all",  # or "coco_dataset" - "train2017", "val2017", or "all"
             "createDataset": false,  # or "create_dataset" - Create dataset if it doesn't exist
@@ -824,7 +834,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
             stream_image_concurrency = data.get('streamImageConcurrency') or data.get('stream_image_concurrency') or pipeline_concurrency
             stream_image_max_replicas = data.get('streamImageMaxReplicas') or data.get('stream_image_max_replicas') or pipeline_max_replicas
-            resnet_concurrency = data.get('resnetConcurrency') or data.get('resnet_concurrency') or pipeline_concurrency
+            resnet_concurrency = data.get('resnetConcurrency') or data.get('resnet_concurrency') or 10
             resnet_max_replicas = data.get('resnetMaxReplicas') or data.get('resnet_max_replicas') or pipeline_max_replicas
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
             # When dataset field is empty, auto-create a dataset so we can create link items and run the pipeline
@@ -2864,7 +2874,7 @@ class StressTestServer(dl.BaseServiceRunner):
         """
         _stream_concurrency = stream_image_concurrency if stream_image_concurrency is not None else pipeline_concurrency
         _stream_max_replicas = stream_image_max_replicas if stream_image_max_replicas is not None else pipeline_max_replicas
-        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else pipeline_concurrency
+        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else 10
         _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
 
         # Set defaults for None values (SDK passes None explicitly)
@@ -4552,7 +4562,7 @@ class ServiceRunner:
         # Default per-node concurrency/replicas from pipeline-wide values
         _stream_image_concurrency = stream_image_concurrency if stream_image_concurrency is not None else pipeline_concurrency
         _stream_image_max_replicas = stream_image_max_replicas if stream_image_max_replicas is not None else pipeline_max_replicas
-        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else pipeline_concurrency
+        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else 10
         _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
 
         # Use storage path from Link Base URL when provided (no date: reuse existing downloads)
