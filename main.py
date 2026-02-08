@@ -660,15 +660,44 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._send_json({'2xx': [], '4xx': [], '5xx': [], 'error': str(e)})
     
     def _get_pipeline_execution_stats(self, path):
-        """GET /api/pipeline-execution-stats?pipeline_id=xxx - return execution counts (success, failed, in_progress), duration, and per-node stats."""
+        """GET /api/pipeline-execution-stats?pipeline_id=xxx OR ?pipeline_name=...&project_id=... - return execution counts (success, failed, in_progress), duration, and per-node stats."""
+        def _send_err(msg):
+            self._send_json({'error': msg, 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
         try:
             parsed = urlparse(path)
             qs = parse_qs(parsed.query or '')
             pipeline_id = (qs.get('pipeline_id') or [None])[0] if qs.get('pipeline_id') else None
-            if not pipeline_id or not pipeline_id.strip():
-                self._send_json({'error': 'pipeline_id is required', 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
+            pipeline_name = (qs.get('pipeline_name') or [None])[0] if qs.get('pipeline_name') else None
+            project_id = (qs.get('project_id') or [None])[0] if qs.get('project_id') else None
+            project_name = (qs.get('project_name') or [None])[0] if qs.get('project_name') else None
+            if pipeline_id:
+                pipeline_id = pipeline_id.strip()
+            if pipeline_name:
+                pipeline_name = pipeline_name.strip()
+            if project_id:
+                project_id = project_id.strip()
+            if project_name:
+                project_name = project_name.strip()
+            if not pipeline_id and (not pipeline_name or not (project_id or project_name or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID'))):
+                _send_err('Provide pipeline_id or (pipeline_name and project_id or project_name, or set PROJECT_ID)')
                 return
-            pipeline_id = pipeline_id.strip()
+            if not pipeline_id and pipeline_name:
+                try:
+                    if project_id:
+                        project = dl.projects.get(project_id=project_id)
+                    elif project_name:
+                        project = dl.projects.get(project_name=project_name)
+                    else:
+                        proj_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+                        if not proj_id:
+                            _send_err('project_id or project_name is required when using pipeline_name')
+                            return
+                        project = dl.projects.get(project_id=proj_id)
+                    pipeline = project.pipelines.get(pipeline_name=pipeline_name)
+                    pipeline_id = pipeline.id
+                except Exception as e:
+                    _send_err(f'Pipeline by name failed: {e}')
+                    return
             headers = {'Authorization': f'Bearer {dl.token()}'}
             base_url = (dl.environment() or '').strip().rstrip('/')
             if not base_url:

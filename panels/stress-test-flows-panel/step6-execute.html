@@ -309,10 +309,10 @@
         <!-- Pipeline execution summary (success / failed / in progress) -->
         <div class="card" id="pipelineStatsCard">
             <h2>Pipeline execution summary</h2>
-            <p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 14px;">Execution counts for the pipeline: how many items finished successfully, failed, or are still in progress. Enter the pipeline ID from your last run or from the workflow result.</p>
+            <p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 14px;">Execution counts for the pipeline: how many items finished successfully, failed, or are still in progress. Pipeline ID is filled automatically from the current run; when not cached, the pipeline name from the parameters above and project ID (from server) are used.</p>
             <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;">
                 <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Pipeline ID:</label>
-                <input type="text" id="pipelineStatsPipelineId" placeholder="Paste pipeline ID (from workflow result or console)" style="flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; font-family: monospace;">
+                <input type="text" id="pipelineStatsPipelineId" placeholder="Auto-filled when a run is in progress, or paste pipeline ID" style="flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; font-family: monospace;">
                 <button type="button" class="btn btn-primary" id="pipelineStatsLoadBtn" style="padding: 8px 20px;">Load stats</button>
                 <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
                     <input type="checkbox" id="pipelineStatsLive" checked>
@@ -1361,18 +1361,80 @@
         const PIPELINE_STATS_POLL_MS = 15000;
         let pipelineStatsChartInstance = null;
         let pipelineStatsPollTimerId = null;
+
+        // Resolve pipeline_id from cache: current workflow (API or localStorage) or most recent saved workflow with pipeline_id
+        async function getCachedPipelineId() {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            if (input && input.value && input.value.trim()) return input.value.trim();
+            const workflowId = currentWorkflowId || localStorage.getItem(STORAGE_KEY_CURRENT_WORKFLOW);
+            if (workflowId) {
+                try {
+                    const res = await fetch(`${API_BASE_URL}/api/workflow-progress/${workflowId}`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+                    if (res.ok) {
+                        const progress = await res.json();
+                        const result = progress && progress.result;
+                        if (result && typeof result === 'object') {
+                            let pid = result.pipeline_id;
+                            if (!pid && result.steps && Array.isArray(result.steps)) {
+                                const createStep = result.steps.find(s => s && s.step === 'create_pipeline');
+                                if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                            }
+                            if (pid) return pid;
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+                const saved = loadWorkflowProgress(workflowId);
+                if (saved && saved.result) {
+                    let pid = saved.result.pipeline_id;
+                    if (!pid && saved.result.steps && Array.isArray(saved.result.steps)) {
+                        const createStep = saved.result.steps.find(s => s && s.step === 'create_pipeline');
+                        if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                    }
+                    if (pid) return pid;
+                }
+            }
+            const all = getAllSavedWorkflows();
+            const entries = Object.entries(all).filter(([_, p]) => p && p.result && (p.result.pipeline_id || (p.result.steps && p.result.steps.some(s => s && s.result && s.result.pipeline_id))));
+            entries.sort((a, b) => (b[1].lastUpdated || 0) - (a[1].lastUpdated || 0));
+            for (const [, p] of entries) {
+                let pid = p.result.pipeline_id;
+                if (!pid && p.result.steps) {
+                    const createStep = p.result.steps.find(s => s && s.step === 'create_pipeline');
+                    if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                }
+                if (pid) return pid;
+            }
+            return null;
+        }
+
         function loadPipelineExecutionStats() {
             const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
-            const pipelineId = (pipelineIdInput && pipelineIdInput.value) ? pipelineIdInput.value.trim() : '';
             const errorEl = document.getElementById('pipelineStatsError');
             const contentEl = document.getElementById('pipelineStatsContent');
-            if (!pipelineId) {
+            let pipelineId = (pipelineIdInput && pipelineIdInput.value) ? pipelineIdInput.value.trim() : '';
+            (async function run() {
+                if (!pipelineId) {
+                    pipelineId = await getCachedPipelineId();
+                    if (pipelineId && pipelineIdInput) {
+                        pipelineIdInput.value = pipelineId;
+                    }
+                }
+                const pipelineNameFromParams = (document.getElementById('pipelineName') && document.getElementById('pipelineName').value) ? document.getElementById('pipelineName').value.trim() : '';
+                const useByName = !pipelineId && pipelineNameFromParams;
+                if (!pipelineId && !useByName) {
+                    if (errorEl) { errorEl.style.display = 'none'; }
+                    if (contentEl) { contentEl.style.display = 'none'; }
+                    return;
+                }
                 if (errorEl) { errorEl.style.display = 'none'; }
-                if (contentEl) { contentEl.style.display = 'none'; }
-                return;
-            }
-            if (errorEl) { errorEl.style.display = 'none'; }
-            fetch(`${API_BASE_URL}/api/pipeline-execution-stats?pipeline_id=${encodeURIComponent(pipelineId)}`)
+                let url = `${API_BASE_URL}/api/pipeline-execution-stats?`;
+                if (pipelineId) {
+                    url += `pipeline_id=${encodeURIComponent(pipelineId)}`;
+                } else {
+                    url += `pipeline_name=${encodeURIComponent(pipelineNameFromParams)}`;
+                }
+                if (pipelineId && document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+                fetch(url)
                 .then(r => r.json())
                 .then(data => {
                     if (data.error) {
@@ -1384,6 +1446,10 @@
                         return;
                     }
                     if (contentEl) contentEl.style.display = 'block';
+                    if (useByName && data.pipeline_id && pipelineIdInput) {
+                        pipelineIdInput.value = data.pipeline_id;
+                        if (document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+                    }
                     const success = data.success || 0;
                     const failed = data.failed || 0;
                     const inProgress = data.in_progress || 0;
@@ -1464,6 +1530,7 @@
                     }
                     if (contentEl) contentEl.style.display = 'none';
                 });
+            })();
         }
         function startPipelineStatsPolling() {
             if (pipelineStatsPollTimerId) return;
@@ -1510,6 +1577,18 @@
         }
         // Expose for progress polling to call when workflow has pipeline_id
         window.tryFillPipelineIdFromWorkflow = tryFillPipelineIdFromWorkflow;
+
+        // On page load: fill pipeline ID from cache when available, then always load stats (cached ID or pipeline name from params)
+        function loadPipelineStatsOnEnter() {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            getCachedPipelineId().then(function(pid) {
+                if (pid && input && !input.value.trim()) input.value = pid;
+                loadPipelineExecutionStats();
+                if (document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+            });
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadPipelineStatsOnEnter);
+        else loadPipelineStatsOnEnter();
     </script>
 </body>
 </html>
