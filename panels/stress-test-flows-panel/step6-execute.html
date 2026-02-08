@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Step 6: Execute Pipeline - Nginx Stress-Test</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         :root {
             --bg-primary: #ffffff; --bg-secondary: #f8fafc; --bg-tertiary: #f1f5f9; --bg-card: #ffffff;
@@ -278,6 +279,31 @@
                 <li><span class="check-icon">✓</span>Pipeline created with ResNet function</li>
                 <li><span class="check-icon">✓</span>Monitoring dashboards ready</li>
             </ul>
+        </div>
+
+        <!-- Nginx / Serve Agent RPS (Prometheus metrics) -->
+        <div class="card" id="nginxRpsCard">
+            <h2>Nginx Response Codes (Serve Agent &amp; Nginx Controller)</h2>
+            <p style="margin-bottom: 12px; color: var(--text-secondary); font-size: 14px;">Requests per second by status class. Data from Prometheus: <code>nginx_gateway_request_duration_seconds_count</code> (2xx, 4xx, 5xx).</p>
+            <div style="position: relative; height: 280px;">
+                <canvas id="nginxRpsChart" style="max-height: 280px;"></canvas>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Time range:</label>
+                <select id="nginxRpsRange" style="padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px;">
+                    <option value="3600">Last 1 hour</option>
+                    <option value="10800">Last 3 hours</option>
+                    <option value="21600" selected>Last 6 hours</option>
+                    <option value="43200">Last 12 hours</option>
+                    <option value="86400">Last 24 hours</option>
+                </select>
+                <button type="button" class="btn btn-secondary" id="refreshNginxRpsBtn" style="padding: 8px 16px; font-size: 13px;">↻ Refresh</button>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                    <input type="checkbox" id="nginxRpsLive" checked>
+                    Live (auto-refresh every 30s)
+                </label>
+                <span id="nginxRpsStatus" style="font-size: 12px; color: var(--text-muted);"></span>
+            </div>
         </div>
 
         <div class="nav-buttons">
@@ -1176,6 +1202,100 @@
                 console.error('Failed to restore workflow:', e);
             }
         });
+
+        // Nginx RPS chart (Prometheus: serve agent & nginx controller) with live polling
+        const NGINX_RPS_POLL_MS = 30000; // 30 seconds
+        let nginxRpsChartInstance = null;
+        let nginxRpsPollTimerId = null;
+        function getNginxRpsStepSeconds(rangeSeconds) {
+            if (rangeSeconds <= 3600) return 15;
+            if (rangeSeconds <= 21600) return 60;   // 6h -> 1 min step
+            if (rangeSeconds <= 43200) return 120;  // 12h -> 2 min step
+            return 300;  // 24h -> 5 min step
+        }
+        function getNginxRpsRangeLabel(seconds) {
+            const h = seconds / 3600;
+            return h === 1 ? '1 hour' : h + ' hours';
+        }
+        function startNginxRpsPolling() {
+            if (nginxRpsPollTimerId) return;
+            nginxRpsPollTimerId = setInterval(loadNginxRpsChart, NGINX_RPS_POLL_MS);
+        }
+        function stopNginxRpsPolling() {
+            if (nginxRpsPollTimerId) {
+                clearInterval(nginxRpsPollTimerId);
+                nginxRpsPollTimerId = null;
+            }
+        }
+        function loadNginxRpsChart() {
+            const statusEl = document.getElementById('nginxRpsStatus');
+            const canvas = document.getElementById('nginxRpsChart');
+            const rangeSelect = document.getElementById('nginxRpsRange');
+            if (!canvas) return;
+            const rangeSeconds = rangeSelect ? parseInt(rangeSelect.value, 10) || 3600 : 3600;
+            const stepSeconds = getNginxRpsStepSeconds(rangeSeconds);
+            if (statusEl) statusEl.textContent = 'Loading…';
+            fetch(`${API_BASE_URL}/api/nginx-rps?range=${rangeSeconds}&step=${stepSeconds}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        if (statusEl) statusEl.textContent = 'Error: ' + data.error;
+                        if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                        nginxRpsChartInstance = null;
+                        return;
+                    }
+                    const toPoints = (arr) => (arr || []).map(([t, v]) => ({ x: t, y: Math.round(v * 100) / 100 }));
+                    const datasets = [
+                        { label: '2xx', data: toPoints(data['2xx']), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: false, tension: 0.2 },
+                        { label: '4xx', data: toPoints(data['4xx']), borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.1)', fill: false, tension: 0.2 },
+                        { label: '5xx', data: toPoints(data['5xx']), borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', fill: false, tension: 0.2 }
+                    ];
+                    const formatTime = (ts) => {
+                        const d = new Date(ts * 1000);
+                        return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+                    };
+                    if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                    nginxRpsChartInstance = new Chart(canvas, {
+                        type: 'line',
+                        data: { datasets },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            interaction: { intersect: false, mode: 'index' },
+                            plugins: { legend: { position: 'top' } },
+                            scales: {
+                                x: {
+                                    type: 'linear',
+                                    title: { display: true, text: 'Time' },
+                                    ticks: { callback: (v) => formatTime(v), maxTicksLimit: 12 }
+                                },
+                                y: { beginAtZero: true, title: { display: true, text: 'req/s' } }
+                            }
+                        }
+                    });
+                    const now = new Date();
+                    const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
+                    if (statusEl) statusEl.textContent = 'Last ' + getNginxRpsRangeLabel(rangeSeconds) + ', step ' + stepSeconds + 's. Last updated ' + timeStr + ' (auto-refresh every 30s).';
+                })
+                .catch(e => {
+                    if (statusEl) statusEl.textContent = 'Failed to load: ' + e.message;
+                    if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                    nginxRpsChartInstance = null;
+                });
+        }
+        const refreshNginxBtn = document.getElementById('refreshNginxRpsBtn');
+        if (refreshNginxBtn) refreshNginxBtn.addEventListener('click', loadNginxRpsChart);
+        const nginxRpsRangeSelect = document.getElementById('nginxRpsRange');
+        if (nginxRpsRangeSelect) nginxRpsRangeSelect.addEventListener('change', loadNginxRpsChart);
+        const nginxRpsLiveCheckbox = document.getElementById('nginxRpsLive');
+        if (nginxRpsLiveCheckbox) {
+            nginxRpsLiveCheckbox.addEventListener('change', function() {
+                if (this.checked) startNginxRpsPolling(); else stopNginxRpsPolling();
+            });
+        }
+        loadNginxRpsChart();
+        startNginxRpsPolling();
+        window.addEventListener('beforeunload', stopNginxRpsPolling);
     </script>
 </body>
 </html>

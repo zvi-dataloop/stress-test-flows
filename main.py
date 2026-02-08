@@ -45,6 +45,9 @@ execution_status = {}
 # Store workflow progress for real-time updates
 workflow_progress = {}  # workflow_id -> {status, current_step, progress_pct, logs, result, error}
 
+# Prometheus URL for Nginx RPS metrics (same namespace: prometheus:9090)
+PROMETHEUS_URL = os.environ.get('PROMETHEUS_URL', 'http://prometheus:3000').rstrip('/')
+
 # Global reference to the server instance (set by StressTestServer.__init__)
 _stress_test_server_instance = None
 
@@ -367,6 +370,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._list_faas_proxy_drivers()
         elif path == '/api/org-access' or path.startswith('/api/org-access'):
             self._check_org_access()
+        elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
+            # Pass full path with query string so range/step params are available
+            self._get_nginx_rps_metrics(self.path)
         else:
             # Handle static file paths
             # Ensure root path serves index.html
@@ -595,6 +601,61 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'botUserName': None,
                 'message': str(e)
             })
+    
+    def _get_nginx_rps_metrics(self, path):
+        """Proxy Prometheus query_range for Nginx gateway RPS (2xx, 4xx, 5xx). GET /api/nginx-rps?start=&end=&step=15s (default: last 1h, step 15s)."""
+        try:
+            parsed = urlparse(path)
+            qs = parse_qs(parsed.query or '')
+            end_ts = int(time.time())
+            range_sec = 3600  # 1 hour
+            step_sec = 15
+            if qs.get('range'):
+                try:
+                    range_sec = int(qs['range'][0])
+                except (ValueError, IndexError):
+                    pass
+            if qs.get('step'):
+                try:
+                    step_sec = int(qs['step'][0].replace('s', '').replace('m', ''))
+                    if 'm' in (qs['step'][0] or ''):
+                        step_sec *= 60
+                except (ValueError, IndexError, AttributeError):
+                    pass
+            start_ts = end_ts - range_sec
+            step_str = f'{step_sec}s'
+            queries = {
+                '2xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="2xx"}[1m]))',
+                '4xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="4xx"}[1m]))',
+                '5xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="5xx"}[1m]))',
+            }
+            out = {'2xx': [], '4xx': [], '5xx': [], 'error': None}
+            for status, expr in queries.items():
+                try:
+                    r = requests.get(
+                        f'{PROMETHEUS_URL}/api/v1/query_range',
+                        params={'query': expr, 'start': start_ts, 'end': end_ts, 'step': step_str},
+                        timeout=10
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    if data.get('status') != 'success' or data.get('data', {}).get('resultType') != 'matrix':
+                        out[status] = []
+                        continue
+                    results = data.get('data', {}).get('result', [])
+                    if not results:
+                        out[status] = []
+                        continue
+                    values = results[0].get('values', [])
+                    out[status] = [[int(t), float(v)] for t, v in values]
+                except Exception as e:
+                    logger.warning(f"Prometheus query for {status} failed: {e}")
+                    out[status] = []
+                    out['error'] = out['error'] or str(e)
+            self._send_json(out)
+        except Exception as e:
+            logger.error(f"Nginx RPS metrics error: {e}", exc_info=True)
+            self._send_json({'2xx': [], '4xx': [], '5xx': [], 'error': str(e)})
     
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
@@ -1633,6 +1694,7 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("  POST /api/execute             - Execute service function")
         logger.info("  POST /api/run-full            - Run full workflow (returns workflow_id)")
         logger.info("  GET  /api/workflow-progress/<workflow_id> - Get workflow progress (real-time)")
+        logger.info("  GET  /api/nginx-rps - Nginx RPS metrics from Prometheus (2xx, 4xx, 5xx)")
         logger.info("  GET  /api/logs/<execution_id> - Get execution logs")
         logger.info("  GET  /api/execution/<execution_id> - Get execution status")
         
