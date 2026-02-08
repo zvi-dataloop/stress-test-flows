@@ -12,19 +12,22 @@ import requests
 import dtlpy as dl
 
 
-def _remote_path_from_link_base_url(link_base_url: str, date_str: str) -> str:
-    if not link_base_url or not date_str:
-        return f'/stress-test/{date_str}'
+def _remote_path_from_link_base_url(link_base_url: str) -> str:
+    """Derive remote path from Link Base URL. Link URL = serve-agent path + path inside storage; strip serve-agent/."""
+    if not link_base_url:
+        return '/stress-test'
     parsed = urlparse(link_base_url)
     path = (parsed.path or '').strip('/')
-    if path.endswith('/' + date_str):
-        path = path[:-len(date_str) - 1].rstrip('/')
+    if not path:
+        return '/stress-test'
+    if path.startswith('serve-agent/'):
+        path = path[len('serve-agent/'):].lstrip('/')
     parts = [p for p in path.split('/') if p]
     folder = parts[-1] if parts else 'stress-test'
-    return f'/{folder}/{date_str}'
+    return f'/{folder}'
 
 
-def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, date_str: str, overwrite: bool = True):
+def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, overwrite: bool = True):
     ext = filename.lower().split('.')[-1]
     mimetype = 'image/jpeg' if ext in ['jpg', 'jpeg'] else f'image/{ext}'
     link_url = f"{link_base_url_full}/{filename}"
@@ -43,7 +46,7 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
     json_filename = f"{os.path.splitext(filename)[0]}.json"
     json_bytes = json.dumps(link_item_content).encode('utf-8')
     buffer = io.BytesIO(json_bytes)
-    remote_path = _remote_path_from_link_base_url(link_base_url_full, date_str)
+    remote_path = _remote_path_from_link_base_url(link_base_url_full)
     dataset.items.upload(
         local_path=buffer,
         remote_path=remote_path,
@@ -55,15 +58,15 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
 def run_download_chunk(args):
     """
     Entry point for process pool: download a chunk of URLs and create link items when requested.
-    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str, workflow_id, create_link, threads_per_process [, progress_queue])
+    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, workflow_id, create_link, threads_per_process [, progress_queue])
     progress_queue: optional; when provided, put(1) per completed item so main process can show accurate progress.
     Returns: (downloaded, failed, skipped, error_str or None)
     """
     log = logging.getLogger('stress-test-server')
     try:
         parts = list(args)
-        progress_queue = parts.pop() if len(parts) == 10 else None
-        (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str,
+        progress_queue = parts.pop() if len(parts) == 9 else None
+        (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id,
          workflow_id, create_link, threads_per_process) = parts
         cancel_file = f"/tmp/stress_cancel_{workflow_id}" if workflow_id else None
 
@@ -96,7 +99,7 @@ def run_download_chunk(args):
                         f.write(response.content)
                 if link_dataset is not None and link_base_url_full and not _is_cancelled():
                     try:
-                        _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, date_str, overwrite=True)
+                        _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, overwrite=True)
                     except Exception as link_err:
                         log.warning(f"Ensure link item failed for {filename}: {link_err}")
                 return {'success': True, 'filename': filename, 'path': str(filepath), 'skipped': file_existed}

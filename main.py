@@ -154,43 +154,43 @@ DOWNLOAD_THREADS_PER_PROCESS = 32
 DOWNLOAD_MAX_PROCESSES = 32
 
 
-def _remote_path_from_link_base_url(link_base_url: str, date_str: str) -> str:
+def _remote_path_from_link_base_url(link_base_url: str) -> str:
     """
     Derive dataset remote path from Link Base URL so it matches the URL path.
-    E.g. http://host/s/pd_datfs2/stress-test2 -> /stress-test2/{date_str}
-    Falls back to /stress-test/{date_str} if path cannot be derived.
+    No date directory: reuse existing downloads from any day.
+    E.g. http://host/s/pd_datfs2/stress-test2 -> /stress-test2
+    Falls back to /stress-test if path cannot be derived.
     """
-    if not link_base_url or not date_str:
-        return f'/stress-test/{date_str}'
+    if not link_base_url:
+        return '/stress-test'
     parsed = urlparse(link_base_url)
     path = (parsed.path or '').strip('/')
-    # If URL already has date at the end (e.g. .../stress-test2/2025-02-03), use the segment before it
-    if path.endswith('/' + date_str):
-        path = path[:-len(date_str) - 1].rstrip('/')
+    if not path:
+        return '/stress-test'
+    # Use last path segment as folder name (e.g. stress-test2 from .../pd_datfs2/stress-test2)
     parts = [p for p in path.split('/') if p]
     folder = parts[-1] if parts else 'stress-test'
-    return f'/{folder}/{date_str}'
+    return f'/{folder}'
 
 
-def _storage_path_from_link_base_url(link_base_url: str, date_str: str):
+def _storage_path_from_link_base_url(link_base_url: str):
     """
     Derive filesystem storage path for download from Link Base URL.
-    E.g. http://host/s/pd_datfs2/stress-test2 -> /s/pd_datfs2/stress-test2/{date_str}
+    No date directory: if already downloaded (e.g. yesterday), we reuse those files.
+    E.g. http://host/s/pd_datfs2/stress-test2 -> /s/pd_datfs2/stress-test2
     Returns None if link_base_url is missing (caller should use default storage_path).
     """
-    if not link_base_url or not date_str:
+    if not link_base_url:
         return None
     parsed = urlparse(link_base_url)
     path = (parsed.path or '').strip('/')
-    if path.endswith('/' + date_str):
-        path = path[:-len(date_str) - 1].rstrip('/')
     if not path:
         return None
     base = '/' + path if not path.startswith('/') else path
-    return f'{base}/{date_str}'
+    return base
 
 
-def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, date_str: str, overwrite: bool = True):
+def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, overwrite: bool = True):
     """Create or update one link item in dataset. Used inside worker process (no self).
     overwrite=True ensures existing items get the correct link URL (create or replace).
     """
@@ -212,7 +212,7 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
     json_filename = f"{os.path.splitext(filename)[0]}.json"
     json_bytes = json.dumps(link_item_content).encode('utf-8')
     buffer = io.BytesIO(json_bytes)
-    remote_path = _remote_path_from_link_base_url(link_base_url_full, date_str)
+    remote_path = _remote_path_from_link_base_url(link_base_url_full)
     dataset.items.upload(
         local_path=buffer,
         remote_path=remote_path,
@@ -224,11 +224,11 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
 def _download_chunk_worker(args):
     """
     Run in a separate process: download a chunk of URLs using N threads.
-    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str, workflow_id, create_link, threads_per_process)
+    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, workflow_id, create_link, threads_per_process)
     Returns: (downloaded, failed, skipped, error_str or None) - 4-tuple so main process can log worker errors without losing partial results.
     """
     try:
-        (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, date_str,
+        (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id,
          workflow_id, create_link, threads_per_process) = args
         log = logging.getLogger('stress-test-server')
         cancel_file = f"/tmp/stress_cancel_{workflow_id}" if workflow_id else None
@@ -263,7 +263,7 @@ def _download_chunk_worker(args):
                 # Ensure link item in dataset for every file (downloaded or already present) with correct URL (create or overwrite)
                 if link_dataset is not None and link_base_url_full and not _is_cancelled():
                     try:
-                        _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, date_str, overwrite=True)
+                        _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, overwrite=True)
                     except Exception as link_err:
                         log.warning(f"Ensure link item failed for {filename}: {link_err}")
                 return {'success': True, 'filename': filename, 'path': str(filepath), 'skipped': file_existed}
@@ -786,8 +786,12 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "driverId": "...",  # or "driver_id" (mandatory)
             "pipelineName": "...",  # or "pipeline_name" (optional)
             "numWorkers": 50,  # or "num_workers"
-            "pipelineConcurrency": 30,  # or "pipeline_concurrency" - concurrent executions per pod (default: 30)
-            "pipelineMaxReplicas": 12,  # or "pipeline_max_replicas" - maximum number of pods (default: 12)
+            "pipelineConcurrency": 30,  # or "pipeline_concurrency" - default for both nodes when per-node not set
+            "pipelineMaxReplicas": 12,  # or "pipeline_max_replicas" - default for both nodes when per-node not set
+            "streamImageConcurrency": 30,  # or "stream_image_concurrency" - code node (stream-image)
+            "streamImageMaxReplicas": 12,  # or "stream_image_max_replicas"
+            "resnetConcurrency": 30,  # or "resnet_concurrency" - ResNet model node
+            "resnetMaxReplicas": 12,  # or "resnet_max_replicas"
             "cocoDataset": "all",  # or "coco_dataset" - "train2017", "val2017", or "all"
             "createDataset": false,  # or "create_dataset" - Create dataset if it doesn't exist
             "skipDownload": false,  # or "skip_download"
@@ -818,6 +822,10 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             num_workers = data.get('numWorkers') or data.get('num_workers', 50)
             pipeline_concurrency = data.get('pipelineConcurrency') or data.get('pipeline_concurrency', 30)
             pipeline_max_replicas = data.get('pipelineMaxReplicas') or data.get('pipeline_max_replicas', 12)
+            stream_image_concurrency = data.get('streamImageConcurrency') or data.get('stream_image_concurrency') or pipeline_concurrency
+            stream_image_max_replicas = data.get('streamImageMaxReplicas') or data.get('stream_image_max_replicas') or pipeline_max_replicas
+            resnet_concurrency = data.get('resnetConcurrency') or data.get('resnet_concurrency') or pipeline_concurrency
+            resnet_max_replicas = data.get('resnetMaxReplicas') or data.get('resnet_max_replicas') or pipeline_max_replicas
             coco_dataset = data.get('cocoDataset') or data.get('coco_dataset', 'all')
             # When dataset field is empty, auto-create a dataset so we can create link items and run the pipeline
             create_dataset_param = data.get('createDataset') or data.get('create_dataset', False)
@@ -872,7 +880,11 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 skip_execute,
                 link_base_url,
                 pipeline_concurrency,
-                pipeline_max_replicas
+                pipeline_max_replicas,
+                stream_image_concurrency,
+                stream_image_max_replicas,
+                resnet_concurrency,
+                resnet_max_replicas
             ), daemon=True).start()
             
             # Return immediately with workflow_id for polling
@@ -928,7 +940,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
     def _run_workflow_async(self, workflow_id, max_images, dataset_id_param, project_id_param,
                            dataset_name, driver_id, pipeline_name, num_workers, coco_dataset,
                            create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
-                           link_base_url, pipeline_concurrency, pipeline_max_replicas):
+                           link_base_url, pipeline_concurrency, pipeline_max_replicas,
+                           stream_image_concurrency, stream_image_max_replicas, resnet_concurrency, resnet_max_replicas):
         """Run workflow in background thread with progress updates"""
         try:
             def update_progress(step, status, progress_pct, message, result=None, error=None):
@@ -994,6 +1007,10 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 num_workers=num_workers,
                 pipeline_concurrency=pipeline_concurrency,
                 pipeline_max_replicas=pipeline_max_replicas,
+                stream_image_concurrency=stream_image_concurrency,
+                stream_image_max_replicas=stream_image_max_replicas,
+                resnet_concurrency=resnet_concurrency,
+                resnet_max_replicas=resnet_max_replicas,
                 coco_dataset=coco_dataset,
                 create_dataset=create_dataset,
                 skip_download=skip_download,
@@ -1519,10 +1536,10 @@ class StressTestServer(dl.BaseServiceRunner):
         self.link_base_url_base = link_base_url_provided
         self.default_dataset_id = dataset_id or DEFAULT_DATASET_ID
         
-        # Add date to paths
+        # No date in storage/link paths: reuse existing downloads from any day
         self.date_str = datetime.now().strftime('%Y-%m-%d')
-        self.storage_path = f"{self.storage_base_path}/{self.date_str}"
-        self.link_base_url = f"{self.link_base_url_base}/{self.date_str}"
+        self.storage_path = self.storage_base_path
+        self.link_base_url = self.link_base_url_base
         
         # Get project_id from environment variable (set by Dataloop)
         self.project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
@@ -1537,9 +1554,8 @@ class StressTestServer(dl.BaseServiceRunner):
         
         logger.info(f"StressTestServer initialized")
         logger.info(f"Storage base path: {self.storage_base_path}")
-        logger.info(f"Storage path (with date): {self.storage_path}")
-        logger.info(f"Link base URL base: {self.link_base_url_base}")
-        logger.info(f"Link base URL (with date): {self.link_base_url}")
+        logger.info(f"Storage path: {self.storage_path}")
+        logger.info(f"Link base URL: {self.link_base_url}")
         logger.info(f"Default dataset ID: {self.default_dataset_id}")
         
         # Store global reference for handler to access
@@ -2431,17 +2447,16 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
         total_images = len(image_urls)
-        # Use storage path from Link Base URL when provided (e.g. .../stress-test2 -> .../stress-test2/date)
+        # Use storage path from Link Base URL when provided (no date dir: reuse existing downloads)
         link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
-        storage_path = _storage_path_from_link_base_url(link_base_for_storage, self.date_str) if link_base_for_storage else None
+        storage_path = _storage_path_from_link_base_url(link_base_for_storage) if link_base_for_storage else None
         if storage_path is None:
             storage_path = self.storage_path
         logger.info(f"Starting download of {total_images} images to {storage_path}")
         # Resolve link_base_url for workers (each process will get dataset by id; no shared memory)
         link_base_url_full = None
         if create_link_on_download and dataset_id and link_base_url:
-            base = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
-            link_base_url_full = base if base.endswith(self.date_str) else f"{base}/{self.date_str}"
+            link_base_url_full = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
         create_link = bool(create_link_on_download and dataset_id and link_base_url_full)
         pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
         num_threads = num_workers if num_workers and num_workers > 0 else DOWNLOAD_THREADS_PER_PROCESS
@@ -2484,7 +2499,7 @@ class StressTestServer(dl.BaseServiceRunner):
             manager = mp.Manager()
             progress_queue = manager.Queue()
             worker_args = [
-                (chunk, storage_path, link_base_url_full, dataset_id, pid, self.date_str, workflow_id, create_link, num_threads, progress_queue)
+                (chunk, storage_path, link_base_url_full, dataset_id, pid, workflow_id, create_link, num_threads, progress_queue)
                 for chunk in chunks
             ]
             try:
@@ -2578,7 +2593,7 @@ class StressTestServer(dl.BaseServiceRunner):
                             f.write(response.content)
                     if link_dataset is not None and link_base_url_full and not _is_cancelled():
                         try:
-                            _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, self.date_str, overwrite=True)
+                            _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, overwrite=True)
                         except Exception as link_err:
                             logger.warning(f"Ensure link item failed for {filename}: {link_err}")
                     return {'success': True, 'filename': filename, 'path': filepath, 'skipped': file_existed}
@@ -2656,7 +2671,7 @@ class StressTestServer(dl.BaseServiceRunner):
         json_filename = f"{os.path.splitext(filename)[0]}.json"
         json_bytes = json.dumps(link_item_content).encode('utf-8')
         buffer = io.BytesIO(json_bytes)
-        remote_path = _remote_path_from_link_base_url(link_base_url_full, self.date_str)
+        remote_path = _remote_path_from_link_base_url(link_base_url_full)
         item = dataset.items.upload(
             local_path=buffer,
             remote_path=remote_path,
@@ -2702,15 +2717,10 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.error(f"Failed to get dataset: {e}")
             raise
         
-        # Override link_base_url if provided
+        # Override link_base_url if provided (no date: reuse existing storage)
         if link_base_url:
-            # Ensure link_base_url preserves the /s path structure
-            # If it doesn't end with a slash, add date directly
-            if link_base_url.endswith('/'):
-                link_base_url_full = f"{link_base_url}{self.date_str}"
-            else:
-                link_base_url_full = f"{link_base_url}/{self.date_str}"
-            logger.info(f"[create_link_items] Using provided link_base_url: {link_base_url} -> {link_base_url_full}")
+            link_base_url_full = link_base_url.strip().rstrip('/')
+            logger.info(f"[create_link_items] Using provided link_base_url: {link_base_url_full}")
         else:
             link_base_url_full = self.link_base_url
             logger.info(f"[create_link_items] Using instance link_base_url: {link_base_url_full}")
@@ -2737,7 +2747,7 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("Fetching existing items to skip duplicates...")
         existing_items = set()
         try:
-            remote_path = _remote_path_from_link_base_url(link_base_url_full, self.date_str)
+            remote_path = _remote_path_from_link_base_url(link_base_url_full)
             filters = dl.Filters()
             filters.add(field='dir', values=remote_path)
             pages = dataset.items.list(filters=filters)
@@ -2830,7 +2840,10 @@ class StressTestServer(dl.BaseServiceRunner):
             out['cancelled'] = cancelled_count
         return out
 
-    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None, pipeline_concurrency: int = 30, pipeline_max_replicas: int = 12) -> dict:
+    def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None,
+                       pipeline_concurrency: int = 30, pipeline_max_replicas: int = 12,
+                       stream_image_concurrency: int = None, stream_image_max_replicas: int = None,
+                       resnet_concurrency: int = None, resnet_max_replicas: int = None) -> dict:
         """
         Create stress test pipeline with ResNet model node.
         Installs the ResNet DPK if not already installed.
@@ -2839,10 +2852,21 @@ class StressTestServer(dl.BaseServiceRunner):
             project_id: Project ID
             pipeline_name: Pipeline name
             dpk_name: DPK name to install (default: 'resnet')
+            pipeline_concurrency: Default concurrency when per-node not set
+            pipeline_max_replicas: Default max replicas when per-node not set
+            stream_image_concurrency: Code node (stream-image) concurrency
+            stream_image_max_replicas: Code node max replicas
+            resnet_concurrency: ResNet node concurrency (used in DPK computeConfigs)
+            resnet_max_replicas: ResNet node max replicas (used in DPK computeConfigs)
         
         Returns:
             dict with pipeline info
         """
+        _stream_concurrency = stream_image_concurrency if stream_image_concurrency is not None else pipeline_concurrency
+        _stream_max_replicas = stream_image_max_replicas if stream_image_max_replicas is not None else pipeline_max_replicas
+        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else pipeline_concurrency
+        _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
+
         # Set defaults for None values (SDK passes None explicitly)
         if dpk_name is None:
             dpk_name = 'resnet'
@@ -2958,14 +2982,14 @@ class StressTestServer(dl.BaseServiceRunner):
                                 compute_config['versions'] = {}
                             compute_config['versions']['dtlpy'] = '1.118.15'
                             
-                            # Merge runtime config with existing runtime if it exists
+                            # Merge runtime config with existing runtime if it exists (ResNet node uses these)
                             new_runtime = {
                                 "podType": "regular-m",
-                                'concurrency': 30,
+                                'concurrency': _resnet_concurrency,
                                 'autoscaler': {
                                     'type': 'rabbitmq',
                                     'minReplicas': 1,
-                                    'maxReplicas': 12
+                                    'maxReplicas': _resnet_max_replicas
                                 }
                             }
                             if 'runtime' in compute_config and isinstance(compute_config['runtime'], dict):
@@ -3239,11 +3263,11 @@ class StressTestServer(dl.BaseServiceRunner):
                 "metadata": {
                     "serviceConfig": {
                         "runtime": {
-                            "concurrency": pipeline_concurrency,
+                            "concurrency": _stream_concurrency,
                             "autoscaler": {
                                 "type": "rabbitmq",
                                 "minReplicas": 1,
-                                "maxReplicas": pipeline_max_replicas,
+                                "maxReplicas": _stream_max_replicas,
                                 "queueLength": 10
                             }
                         }
@@ -4471,7 +4495,7 @@ class ServiceRunner:
                 logger.warning(f"Error polling pipeline state progress: {e}")
                 time_module.sleep(poll_interval)
     
-    def run_full_stress_test(self, 
+    def run_full_stress_test(self,
                              max_images: int = 50000,
                              dataset_id: str = None,
                              project_id: str = None,
@@ -4481,6 +4505,10 @@ class ServiceRunner:
                              num_workers: int = 50,
                              pipeline_concurrency: int = 30,
                              pipeline_max_replicas: int = 12,
+                             stream_image_concurrency: int = None,
+                             stream_image_max_replicas: int = None,
+                             resnet_concurrency: int = None,
+                             resnet_max_replicas: int = None,
                              coco_dataset: str = 'all',
                              create_dataset: bool = False,
                              skip_download: bool = False,
@@ -4513,12 +4541,22 @@ class ServiceRunner:
             skip_pipeline: Skip pipeline creation
             skip_execute: Skip pipeline execution
             link_base_url: Base URL for link items (overrides instance default)
+            stream_image_concurrency: Code node (stream-image) concurrency (default: pipeline_concurrency)
+            stream_image_max_replicas: Code node max replicas (default: pipeline_max_replicas)
+            resnet_concurrency: ResNet node concurrency (default: pipeline_concurrency)
+            resnet_max_replicas: ResNet node max replicas (default: pipeline_max_replicas)
         
         Returns:
             dict with full results
         """
-        # Use storage path from Link Base URL when provided (same as download_images)
-        effective_storage_path = _storage_path_from_link_base_url(link_base_url, self.date_str) if link_base_url else None
+        # Default per-node concurrency/replicas from pipeline-wide values
+        _stream_image_concurrency = stream_image_concurrency if stream_image_concurrency is not None else pipeline_concurrency
+        _stream_image_max_replicas = stream_image_max_replicas if stream_image_max_replicas is not None else pipeline_max_replicas
+        _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else pipeline_concurrency
+        _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
+
+        # Use storage path from Link Base URL when provided (no date: reuse existing downloads)
+        effective_storage_path = _storage_path_from_link_base_url(link_base_url) if link_base_url else None
         if effective_storage_path is None:
             effective_storage_path = self.storage_path
         results = {
@@ -4854,7 +4892,11 @@ class ServiceRunner:
                 pipeline_name=pipeline_name, 
                 project_id=project_id,
                 pipeline_concurrency=pipeline_concurrency,
-                pipeline_max_replicas=pipeline_max_replicas
+                pipeline_max_replicas=pipeline_max_replicas,
+                stream_image_concurrency=_stream_image_concurrency,
+                stream_image_max_replicas=_stream_image_max_replicas,
+                resnet_concurrency=_resnet_concurrency,
+                resnet_max_replicas=_resnet_max_replicas
             )
             logger.info(f"create_pipeline returned: {pipeline_result}")
             results['steps'].append({

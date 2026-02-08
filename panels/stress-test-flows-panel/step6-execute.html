@@ -164,8 +164,17 @@
                 </div>
                 <div class="form-group">
                     <label>Link Base URL</label>
-                    <input type="text" id="linkBaseUrl" value="http://34.140.193.179/s/pd_datfs2/stress-test" placeholder="Link Base URL">
-                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Base URL for link items</small>
+                    <input type="text" id="linkBaseUrl" value="" placeholder="e.g. https://my-domain.ai/serve-agent/root-folder/subfolder">
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Full URL where images are served. Link items will point to <code>{Link Base URL}/{filename}</code>. Format: <strong>serve-agent path</strong> + <strong>path inside storage</strong>.</small>
+                    <details style="margin-top: 8px; font-size: 11px; color: var(--text-muted);">
+                        <summary style="cursor: pointer;">How to build the Link Base URL</summary>
+                        <p style="margin: 6px 0 4px 0;">Link Base URL = <strong>serve-agent path</strong> + <strong>path inside storage</strong>. No trailing slash.</p>
+                        <ul style="margin: 4px 0 0 16px; padding-right: 0;">
+                            <li>With serve-agent: <code>https://my-domain.ai/serve-agent/root-folder/subfolder</code></li>
+                            <li>Without prefix: <code>http://34.140.193.179/root-folder/subfolder</code></li>
+                        </ul>
+                        <p style="margin: 8px 0 0 0;">The path inside storage must match where files are stored and how your driver serves them. Images are reused in that path if already downloaded.</p>
+                    </details>
                 </div>
                 <div class="form-group">
                     <label>Pipeline Name</label>
@@ -175,15 +184,33 @@
                     <label>Num Workers</label>
                     <input type="number" id="numWorkers" value="50" min="1" max="100">
                 </div>
-                <div class="form-group">
-                    <label>Pipeline Concurrency</label>
-                    <input type="number" id="pipelineConcurrency" value="30" min="1" max="50">
-                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Concurrent executions per pod</small>
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label style="font-weight: 600;">Stream Image (Code Node)</label>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px;">
+                        <div style="flex: 1; min-width: 100px;">
+                            <label style="font-weight: normal; font-size: 11px;">Concurrency</label>
+                            <input type="number" id="streamImageConcurrency" value="30" min="1" max="50" style="width: 100%;">
+                        </div>
+                        <div style="flex: 1; min-width: 100px;">
+                            <label style="font-weight: normal; font-size: 11px;">Max Replicas</label>
+                            <input type="number" id="streamImageMaxReplicas" value="12" min="1" max="50" style="width: 100%;">
+                        </div>
+                    </div>
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Concurrent executions per pod and max pods for the stream-image code node</small>
                 </div>
-                <div class="form-group">
-                    <label>Pipeline Max Replicas</label>
-                    <input type="number" id="pipelineMaxReplicas" value="12" min="1" max="50">
-                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Maximum number of pods</small>
+                <div class="form-group" style="margin-bottom: 12px;">
+                    <label style="font-weight: 600;">ResNet (Model Node)</label>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 4px;">
+                        <div style="flex: 1; min-width: 100px;">
+                            <label style="font-weight: normal; font-size: 11px;">Concurrency</label>
+                            <input type="number" id="resnetConcurrency" value="10" min="1" max="50" style="width: 100%;">
+                        </div>
+                        <div style="flex: 1; min-width: 100px;">
+                            <label style="font-weight: normal; font-size: 11px;">Max Replicas</label>
+                            <input type="number" id="resnetMaxReplicas" value="12" min="1" max="50" style="width: 100%;">
+                        </div>
+                    </div>
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Concurrent executions per pod and max pods for the ResNet model node</small>
                 </div>
             </div>
 
@@ -731,8 +758,12 @@
                 pipelineName: document.getElementById('pipelineName').value,
                 // Project ID is optional - will be auto-detected from service
                 numWorkers: parseInt(document.getElementById('numWorkers').value),
-                pipelineConcurrency: parseInt(document.getElementById('pipelineConcurrency').value),
-                pipelineMaxReplicas: parseInt(document.getElementById('pipelineMaxReplicas').value)
+                pipelineConcurrency: parseInt(document.getElementById('streamImageConcurrency').value) || 30,
+                pipelineMaxReplicas: parseInt(document.getElementById('streamImageMaxReplicas').value) || 12,
+                streamImageConcurrency: parseInt(document.getElementById('streamImageConcurrency').value) || 30,
+                streamImageMaxReplicas: parseInt(document.getElementById('streamImageMaxReplicas').value) || 12,
+                resnetConcurrency: parseInt(document.getElementById('resnetConcurrency').value) || 10,
+                resnetMaxReplicas: parseInt(document.getElementById('resnetMaxReplicas').value) || 12
             };
 
             if (!config.driverId) {
