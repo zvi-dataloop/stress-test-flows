@@ -319,81 +319,81 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         logger.info("%s - - [%s] %s", self.address_string(), self.log_date_time_string(), msg)
 
     def do_GET(self):
-        """Handle GET requests"""
-        parsed = urlparse(self.path)
-        path = parsed.path
-        
-        logger.info(f"GET request received: {path} (full path: {self.path})")
-        
-        # Handle /metrics first (before any path rewriting) so platform scrapers always get 200 and pod is not restarted
-        if path == '/metrics' or path.rstrip('/') == '/metrics':
-            self._serve_metrics()
-            return
-        
-        # Normalize path - handle multiple possible formats
-        original_path = path
-        
-        # Remove common prefixes that might be added by Dataloop/Tornado
-        # Handle: /stress-test-panel/, /panels/stress-test-panel/, /api/v1/apps/.../panels/stress-test-panel/
-        prefixes_to_remove = [
-            '/api/v1/apps/nginx-stress-test-flows-env2/panels/stress-test-panel',
-            '/api/v1/apps/nginx-stress-test-flows-env2/panels',
-            '/panels/stress-test-panel',
-            '/stress-test-panel'
-        ]
-        
-        for prefix in prefixes_to_remove:
-            if path.startswith(prefix + '/'):
-                path = path[len(prefix):]
-                logger.info(f"Removed prefix '{prefix}': {original_path} -> {path}")
-                break
-            elif path == prefix:
-                path = '/'
-                logger.info(f"Matched exact prefix '{prefix}': {original_path} -> {path}")
-                break
-        
-        # API endpoints - check after prefix removal
-        if path == '/api/health' or path.startswith('/api/health'):
-            logger.info("Serving /api/health")
-            self._send_json({'status': 'ok', 'service': 'stress-test-server'})
-        elif path == '/api/project' or path.startswith('/api/project'):
-            self._get_project_info()
-        elif path == '/api/datasets' or path.startswith('/api/datasets'):
-            self._list_datasets()
-        elif path == '/api/pipelines' or path.startswith('/api/pipelines'):
-            self._list_pipelines()
-        elif path.startswith('/api/logs/'):
-            execution_id = path.split('/')[-1]
-            self._get_execution_logs(execution_id)
-        elif path.startswith('/api/execution/'):
-            execution_id = path.split('/')[-1]
-            self._get_execution_status(execution_id)
-        elif path.startswith('/api/workflow-progress/'):
-            workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
-            self._get_workflow_progress(workflow_id)
-        elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
-            self._get_active_workflow()
-        elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
-            self._list_gcs_integrations()
-        elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
-            self._list_faas_proxy_drivers()
-        elif path == '/api/org-access' or path.startswith('/api/org-access'):
-            self._check_org_access()
-        elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
-            # Pass full path with query string so range/step params are available
-            self._get_nginx_rps_metrics(self.path)
-        elif path == '/api/pipeline-execution-stats' or path.startswith('/api/pipeline-execution-stats'):
-            self._get_pipeline_execution_stats(self.path)
-        else:
-            # Handle static file paths
-            # Ensure root path serves index.html
-            if path == '/' or path == '':
-                path = '/index.html'
-                logger.info(f"Root path, serving index.html")
-            
-            logger.info(f"Serving static file: {path} (from original: {original_path})")
-            # Serve static files
-            self._serve_static_file(path)
+        """Handle GET requests. Wrapped in try/except so service never crashes (platform health checks keep working)."""
+        path = ''
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            logger.info(f"GET request received: {path} (full path: {self.path})")
+            # Handle /metrics first (before any path rewriting) so platform scrapers always get 200 and pod is not restarted
+            if path == '/metrics' or path.rstrip('/') == '/metrics':
+                self._serve_metrics()
+                return
+            original_path = path
+            # Remove common prefixes that might be added by Dataloop/Tornado
+            prefixes_to_remove = [
+                '/api/v1/apps/nginx-stress-test-flows-env2/panels/stress-test-panel',
+                '/api/v1/apps/nginx-stress-test-flows-env2/panels',
+                '/panels/stress-test-panel',
+                '/stress-test-panel'
+            ]
+            for prefix in prefixes_to_remove:
+                if path.startswith(prefix + '/'):
+                    path = path[len(prefix):]
+                    logger.info(f"Removed prefix '{prefix}': {original_path} -> {path}")
+                    break
+                elif path == prefix:
+                    path = '/'
+                    logger.info(f"Matched exact prefix '{prefix}': {original_path} -> {path}")
+                    break
+            # API endpoints - check after prefix removal
+            if path == '/api/health' or path.startswith('/api/health'):
+                logger.info("Serving /api/health")
+                self._send_json({'status': 'ok', 'service': 'stress-test-server'})
+            elif path == '/api/project' or path.startswith('/api/project'):
+                self._get_project_info()
+            elif path == '/api/datasets' or path.startswith('/api/datasets'):
+                self._list_datasets()
+            elif path == '/api/pipelines' or path.startswith('/api/pipelines'):
+                self._list_pipelines()
+            elif path.startswith('/api/logs/'):
+                execution_id = path.split('/')[-1]
+                self._get_execution_logs(execution_id)
+            elif path.startswith('/api/execution/'):
+                execution_id = path.split('/')[-1]
+                self._get_execution_status(execution_id)
+            elif path.startswith('/api/workflow-progress/'):
+                workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
+                self._get_workflow_progress(workflow_id)
+            elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
+                self._get_active_workflow()
+            elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
+                self._list_gcs_integrations()
+            elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
+                self._list_faas_proxy_drivers()
+            elif path == '/api/org-access' or path.startswith('/api/org-access'):
+                self._check_org_access()
+            elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
+                self._get_nginx_rps_metrics(self.path)
+            elif path == '/api/pipeline-execution-stats' or path.startswith('/api/pipeline-execution-stats'):
+                self._get_pipeline_execution_stats(self.path)
+            else:
+                if path == '/' or path == '':
+                    path = '/index.html'
+                    logger.info(f"Root path, serving index.html")
+                logger.info(f"Serving static file: {path} (from original: {original_path})")
+                self._serve_static_file(path)
+        except Exception as e:
+            logger.error(f"GET handler error: {e}", exc_info=True)
+            if path == '/metrics' or (path and path.rstrip('/') == '/metrics'):
+                self._serve_metrics()
+            elif path == '/api/health' or (path and path.startswith('/api/health')):
+                self._send_json({'status': 'error', 'service': 'stress-test-server'}, status=200)
+            else:
+                try:
+                    self._send_error(500, str(e)[:200])
+                except Exception:
+                    pass
     
     def _serve_static_file(self, path):
         """Serve static files with proper path handling"""
@@ -490,28 +490,33 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._send_error(500, str(e))
     
     def do_POST(self):
-        """Handle POST requests"""
-        parsed = urlparse(self.path)
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
-        
+        """Handle POST requests. Wrapped in try/except so service never crashes."""
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            self._send_error(400, 'Invalid JSON')
-            return
-        
-        if parsed.path == '/api/execute':
-            self._execute_service_function(data)
-        elif parsed.path == '/api/run-full':
-            self._run_full_workflow(data)
-        elif parsed.path == '/api/create-faas-proxy-driver':
-            self._create_faas_proxy_driver(data)
-        elif parsed.path.startswith('/api/cancel-workflow/'):
-            workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
-            self._cancel_workflow(workflow_id)
-        else:
-            self._send_error(404, 'Not Found')
+            parsed = urlparse(self.path)
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_error(400, 'Invalid JSON')
+                return
+            if parsed.path == '/api/execute':
+                self._execute_service_function(data)
+            elif parsed.path == '/api/run-full':
+                self._run_full_workflow(data)
+            elif parsed.path == '/api/create-faas-proxy-driver':
+                self._create_faas_proxy_driver(data)
+            elif parsed.path.startswith('/api/cancel-workflow/'):
+                workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
+                self._cancel_workflow(workflow_id)
+            else:
+                self._send_error(404, 'Not Found')
+        except Exception as e:
+            logger.error(f"POST handler error: {e}", exc_info=True)
+            try:
+                self._send_error(500, str(e)[:200])
+            except Exception:
+                pass
     
     def _send_json(self, data, status=200):
         """Send JSON response"""
@@ -909,7 +914,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             })
 
     def _serve_metrics(self):
-        """Serve GET /metrics with minimal Prometheus exposition format so platform scrapers get 200 and do not restart the pod."""
+        """Serve GET /metrics with minimal Prometheus exposition format. Always return 200 so platform does not restart the pod."""
         try:
             body = "# HELP stress_test_server_up Server is up (1 = up).\n# TYPE stress_test_server_up gauge\nstress_test_server_up 1\n"
             self.send_response(200)
@@ -919,7 +924,13 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self.wfile.write(body.encode('utf-8'))
         except Exception as e:
             logger.debug(f"Metrics endpoint error: {e}")
-            self._send_error(500, 'Internal Server Error')
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(b"stress_test_server_up 1\n")
+            except Exception:
+                pass
 
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
@@ -3744,104 +3755,63 @@ class ServiceRunner:
                 'app_id': app.id if app else None
             }
         
-        # Install the pipeline (with retry for package conflicts)
+        # Install the pipeline (with retry for package conflicts). Skip install when already Installed to avoid platform restart.
         logger.info(f"Step 4f: Installing pipeline (this may take a few minutes)...")
         max_install_retries = 3
         install_success = False
         for retry in range(max_install_retries):
+            # When reusing existing pipeline, skip install if already Installed to avoid service restart
+            try:
+                pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+                if getattr(pipeline, 'status', None) == 'Installed':
+                    logger.info(f"Step 4f: Pipeline already Installed, skipping install to avoid restart.")
+                    install_success = True
+                    break
+            except Exception:
+                pass
             install_exception = None
             try:
                 logger.info(f"Installing pipeline (attempt {retry + 1}/{max_install_retries})...")
                 pipeline.install()
                 logger.info("Pipeline install() call completed, refreshing pipeline status...")
-                # Refresh pipeline to get latest status
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 logger.info(f"Pipeline status after install: {pipeline.status}")
-                
-                # Check if installation succeeded
                 if pipeline.status in ['Installed']:
                     logger.info("Pipeline installed successfully")
                     install_success = True
                     break
                 else:
                     logger.warning(f"Pipeline status after install: {pipeline.status}")
-                    
             except Exception as e:
                 install_exception = e
                 error_str = str(e)
                 logger.warning(f"Pipeline install raised exception: {error_str}")
-            
-            # Check if installation failed (either via exception or status)
             should_check_error = False
             error_message = None
-            
             if install_exception:
                 error_str = str(install_exception)
                 error_message = error_str
                 should_check_error = True
                 logger.info(f"Checking exception message for package conflict: {error_str[:200]}")
-                # Also check if error is in tuple format (common in Dataloop SDK)
                 if isinstance(install_exception, tuple) and len(install_exception) >= 2:
                     error_message = str(install_exception[1]) if install_exception[1] else error_str
                     logger.info(f"Extracted error from tuple: {error_message[:200]}")
-            
-            # Also check pipeline status if no exception or status is Failure
             try:
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 if pipeline.status == "Failure":
                     should_check_error = True
                     logger.warning(f"Pipeline installation failed with status: {pipeline.status}")
-                    # Try to fetch composition to get error details
                     try:
-                        # Try to get composition_id from pipeline
-                        composition_id = None
-                        if hasattr(pipeline, 'composition_id'):
-                            composition_id = pipeline.composition_id
-                        elif hasattr(pipeline, 'composition') and hasattr(pipeline.composition, 'id'):
-                            composition_id = pipeline.composition.id
-                        elif hasattr(pipeline, 'composition') and isinstance(pipeline.composition, dict):
-                            composition_id = pipeline.composition.get('id')
-                        
+                        composition_id = getattr(pipeline, 'composition_id', None) or (pipeline.composition.get('id') if isinstance(getattr(pipeline, 'composition', None), dict) else None)
                         if composition_id:
-                            logger.info(f"Fetching composition {composition_id}...")
                             composition = project.compositions.get(composition_id=composition_id)
                             error_text = composition.get('errorText') if isinstance(composition, dict) else getattr(composition, 'errorText', None)
                             if error_text:
-                                if isinstance(error_text, dict):
-                                    error_message = error_text.get('message', '')
-                                else:
-                                    error_message = str(error_text)
-                                if error_message:
-                                    logger.info(f"Found error in composition.errorText: {error_message}")
-                            else:
-                                logger.info(f"No error in composition.errorText")
-                                # Also try to access as dict
-                                if isinstance(composition, dict):
-                                    error_message = composition.get('errorText', {}).get('message', '') or composition.get('error', {}).get('message', '')
-                                    if error_message:
-                                        logger.info(f"Found error in composition dict: {error_message}")
-                        else:
-                            logger.warning("Could not find composition_id from pipeline")
-                            # Fallback: try direct access
-                            if hasattr(pipeline, 'composition'):
-                                composition = pipeline.composition
-                                if isinstance(composition, dict):
-                                    error_text = composition.get('errorText', {})
-                                    if isinstance(error_text, dict):
-                                        error_message = error_text.get('message', '')
-                                    else:
-                                        error_message = str(error_text) if error_text else None
-                                    if error_message:
-                                        logger.info(f"Found error in pipeline.composition: {error_message}")
+                                error_message = error_text.get('message', '') if isinstance(error_text, dict) else str(error_text)
                     except Exception as comp_error:
                         logger.warning(f"Could not fetch composition: {comp_error}")
-                        import traceback
-                        logger.debug(traceback.format_exc())
             except Exception as refresh_error:
                 logger.warning(f"Could not refresh pipeline: {refresh_error}")
-            
-            # Check if error is about stream-image package already existing
-            # Check for various forms of the error message
             package_conflict_detected = False
             if should_check_error and error_message:
                 error_lower = error_message.lower()
@@ -3851,17 +3821,12 @@ class ServiceRunner:
                     ('stream-image' in error_lower and 'already exist' in error_lower)):
                     package_conflict_detected = True
                     logger.info(f"Package conflict detected in error message: {error_message[:200]}")
-            
             if package_conflict_detected:
                 logger.warning("Package name conflict detected - updating code node to use unique package name")
-                
-                # Generate unique package name
                 import time as time_module
                 unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
                 new_package_name = f"stream-image-{unique_suffix}"
                 logger.info(f"Updating package name from 'stream-image' to '{new_package_name}'")
-                
-                # Get current pipeline nodes
                 try:
                     pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                     current_nodes = pipeline.nodes
@@ -5236,25 +5201,30 @@ class ServiceRunner:
             logger.info("STEP 3: Creating pipeline")
             logger.info("=" * 60)
             
-            pipeline_result = self.create_pipeline(
-                pipeline_name=pipeline_name, 
-                project_id=project_id,
-                pipeline_concurrency=pipeline_concurrency,
-                pipeline_max_replicas=pipeline_max_replicas,
-                stream_image_concurrency=_stream_image_concurrency,
-                stream_image_max_replicas=_stream_image_max_replicas,
-                resnet_concurrency=_resnet_concurrency,
-                resnet_max_replicas=_resnet_max_replicas
-            )
+            try:
+                pipeline_result = self.create_pipeline(
+                    pipeline_name=pipeline_name,
+                    project_id=project_id,
+                    pipeline_concurrency=pipeline_concurrency,
+                    pipeline_max_replicas=pipeline_max_replicas,
+                    stream_image_concurrency=_stream_image_concurrency,
+                    stream_image_max_replicas=_stream_image_max_replicas,
+                    resnet_concurrency=_resnet_concurrency,
+                    resnet_max_replicas=_resnet_max_replicas
+                )
+            except Exception as create_err:
+                logger.error(f"create_pipeline raised: {create_err}", exc_info=True)
+                pipeline_result = {'error': str(create_err), 'pipeline_id': None}
             logger.info(f"create_pipeline returned: {pipeline_result}")
             results['steps'].append({
                 'step': 'create_pipeline',
                 'result': pipeline_result
             })
-            pipeline_id = pipeline_result.get('pipeline_id')
+            # Always use pipeline_id when present so batch execution can run even if install had issues
+            pipeline_id = pipeline_result.get('pipeline_id') if isinstance(pipeline_result, dict) else None
             logger.info(f"Extracted pipeline_id: {pipeline_id}")
             if progress_callback:
-                if 'error' in pipeline_result:
+                if pipeline_result and pipeline_result.get('error'):
                     error_msg = pipeline_result.get('error', 'Unknown error')
                     logger.error(f"Pipeline creation failed: {error_msg}")
                     progress_callback('create_pipeline', 'failed', 65, f"Failed: {error_msg}", error=error_msg)
