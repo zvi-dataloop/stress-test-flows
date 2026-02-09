@@ -313,13 +313,22 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         # Don't use directory parameter - we'll handle paths manually
         super().__init__(*args, **kwargs)
 
-    
+    def log_message(self, format, *args):
+        """Log requests at INFO so 200 responses are not captured as ERROR (base class logs to stderr and is often treated as ERROR by platforms)."""
+        msg = format % args if args else format
+        logger.info("%s - - [%s] %s", self.address_string(), self.log_date_time_string(), msg)
+
     def do_GET(self):
         """Handle GET requests"""
         parsed = urlparse(self.path)
         path = parsed.path
         
         logger.info(f"GET request received: {path} (full path: {self.path})")
+        
+        # Handle /metrics first (before any path rewriting) so platform scrapers always get 200 and pod is not restarted
+        if path == '/metrics' or path.rstrip('/') == '/metrics':
+            self._serve_metrics()
+            return
         
         # Normalize path - handle multiple possible formats
         original_path = path
@@ -879,7 +888,20 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'nodes': [],
                 'pipeline_id': None
             })
-    
+
+    def _serve_metrics(self):
+        """Serve GET /metrics with minimal Prometheus exposition format so platform scrapers get 200 and do not restart the pod."""
+        try:
+            body = "# HELP stress_test_server_up Server is up (1 = up).\n# TYPE stress_test_server_up gauge\nstress_test_server_up 1\n"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body.encode('utf-8'))))
+            self.end_headers()
+            self.wfile.write(body.encode('utf-8'))
+        except Exception as e:
+            logger.debug(f"Metrics endpoint error: {e}")
+            self._send_error(500, 'Internal Server Error')
+
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
         try:
@@ -3489,56 +3511,58 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.error(f"Failed to list models: {e}")
             return {'error': f'Failed to list models: {str(e)}'}
         
-        # Step 3: Check if pipeline already exists - delete it to recreate fresh
+        # Step 3: Use existing pipeline if present (reuse to avoid delete-triggered restarts); otherwise create new
         logger.info(f"Step 3: Checking for existing pipeline...")
+        pipeline = None
         try:
             existing = project.pipelines.get(pipeline_name=pipeline_name)
-            logger.info(f"Found existing pipeline: {existing.id}. Deleting to recreate...")
-            existing.delete()
-            logger.info("Deleted existing pipeline")
+            logger.info(f"Found existing pipeline: {existing.id}. Reusing it (will update nodes and reinstall).")
+            pipeline = existing
         except dl.exceptions.NotFound:
             logger.info("No existing pipeline found")
-        
-        # Step 4: Create new pipeline with 2 nodes: code node (stream-image) -> ResNet
-        logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
-        
-        # Check if stream-image package/DPK already exists and rename it if needed
-        try:
-            existing_package = project.packages.get(package_name='stream-image')
-            if existing_package:
-                logger.info(f"Found existing stream-image package: {existing_package.id}")
-                # Generate unique package name
-                import time as time_module
-                unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
-                new_package_name = f"stream-image-{unique_suffix}"
-                logger.info(f"Renaming existing package from 'stream-image' to '{new_package_name}' to avoid conflict")
-                
-                # Rename the package
-                try:
-                    existing_package.name = new_package_name
-                    existing_package.update()
-                    logger.info(f"Successfully renamed package to: {new_package_name}")
-                except Exception as rename_error:
-                    logger.warning(f"Could not rename package: {rename_error}")
-                    # Try to delete it instead
-                    try:
-                        logger.info(f"Trying to delete existing package instead...")
-                        existing_package.delete()
-                        logger.info(f"Successfully deleted existing package")
-                    except Exception as delete_error:
-                        logger.warning(f"Could not delete package either: {delete_error}")
-        except dl.exceptions.NotFound:
-            logger.info("No existing stream-image package found - will create new one")
         except Exception as e:
-            logger.warning(f"Could not check for existing stream-image package: {e}")
+            logger.warning(f"Could not get pipeline by name: {e}")
         
-        # Ensure stream-image package doesn't exist (will be created by pipeline from config)
-        # The pipeline will create the package from the code node config, but it fails if a package with that name already exists
-        logger.info("Ensuring stream-image package name is available for pipeline creation...")
-        
-        # Create pipeline
-        pipeline = project.pipelines.create(name=pipeline_name)
-        logger.info(f"Created pipeline: {pipeline.id}")
+        if pipeline is None:
+            # Step 4: Create new pipeline (no existing one)
+            logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
+            # Check if stream-image package/DPK already exists and rename it if needed
+            try:
+                existing_package = project.packages.get(package_name='stream-image')
+                if existing_package:
+                    logger.info(f"Found existing stream-image package: {existing_package.id}")
+                    # Generate unique package name
+                    import time as time_module
+                    unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
+                    new_package_name = f"stream-image-{unique_suffix}"
+                    logger.info(f"Renaming existing package from 'stream-image' to '{new_package_name}' to avoid conflict")
+                    
+                    # Rename the package
+                    try:
+                        existing_package.name = new_package_name
+                        existing_package.update()
+                        logger.info(f"Successfully renamed package to: {new_package_name}")
+                    except Exception as rename_error:
+                        logger.warning(f"Could not rename package: {rename_error}")
+                        # Try to delete it instead
+                        try:
+                            logger.info(f"Trying to delete existing package instead...")
+                            existing_package.delete()
+                            logger.info(f"Successfully deleted existing package")
+                        except Exception as delete_error:
+                            logger.warning(f"Could not delete package either: {delete_error}")
+            except dl.exceptions.NotFound:
+                logger.info("No existing stream-image package found - will create new one")
+            except Exception as e:
+                logger.warning(f"Could not check for existing stream-image package: {e}")
+            
+            # Ensure stream-image package doesn't exist (will be created by pipeline from config)
+            logger.info("Ensuring stream-image package name is available for pipeline creation...")
+            
+            pipeline = project.pipelines.create(name=pipeline_name)
+            logger.info(f"Created pipeline: {pipeline.id}")
+        else:
+            logger.info(f"Step 4: Reusing existing pipeline {pipeline.id}, will update nodes and install.")
         
         # Add 2 nodes connected: stream-image (code) -> resnet (ml)
         try:
