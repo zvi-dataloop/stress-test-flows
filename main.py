@@ -627,9 +627,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             start_ts = end_ts - range_sec
             step_str = f'{step_sec}s'
             queries = {
-                '2xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="2xx"}[1m]))',
-                '4xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="4xx"}[1m]))',
-                '5xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="5xx"}[1m]))',
+                '2xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="2xx",job="kubernetes-service-endpoints"}[1m]))',
+                '4xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="4xx",job="kubernetes-service-endpoints"}[1m]))',
+                '5xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="5xx",job="kubernetes-service-endpoints"}[1m]))',
             }
             out = {'2xx': [], '4xx': [], '5xx': [], 'error': None}
             for status, expr in queries.items():
