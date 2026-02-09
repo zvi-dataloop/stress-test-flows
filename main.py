@@ -748,8 +748,13 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     failed_count = count
                 elif status in ('in-progress', 'inprogress', 'running', 'pending'):
                     in_progress_count = count
-            # Per-node counters if present (e.g. nodeExecutionCounters)
-            node_counters = pipeline_stats.get('nodeExecutionCounters') or pipeline_stats.get('nodes') or []
+            # Per-node counters if present (try multiple possible API response shapes)
+            node_counters = (
+                pipeline_stats.get('nodeExecutionCounters')
+                or pipeline_stats.get('nodeCounters')
+                or pipeline_stats.get('nodes')
+                or []
+            )
             if isinstance(node_counters, list) and node_counters:
                 for nc in node_counters:
                     node_id = nc.get('nodeId') or nc.get('node_id') or nc.get('id') or ''
@@ -770,12 +775,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                         nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': ns, 'failed': nf, 'in_progress': np})
             completed = success_count + failed_count
             total = completed + in_progress_count
-            # If API didn't return per-node counters, each node sees the same pipeline totals (each item passes through every node)
-            if nodes_list and not any(n.get('success') or n.get('failed') or n.get('in_progress') for n in nodes_list):
-                for n in nodes_list:
-                    n['success'] = success_count
-                    n['failed'] = failed_count
-                    n['in_progress'] = in_progress_count
+            # Do NOT copy pipeline-level totals to every node when per-node counters are missing - that made both nodes show identical stats. Leave per-node at 0 when API doesn't provide nodeExecutionCounters.
+            per_node_available = any((n.get('success') or n.get('failed') or n.get('in_progress')) for n in nodes_list)
             # 3) Duration: first execution to last (use raw API so we get JSON dates reliably)
             duration_seconds = None
             def _parse_ts(v):
@@ -873,6 +874,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'total': total if total > 0 else (success_count + failed_count + in_progress_count),
                 'duration_seconds': duration_seconds,
                 'nodes': nodes_list,
+                'per_node_available': per_node_available,
                 'error': None
             })
         except Exception as e:
@@ -3579,6 +3581,8 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info("Creating code node configuration...")
             code_node = {
                 "id": code_node_id,
+                "name": "stream-image",
+                "displayName": "Stream Image",
                 "inputs": [
                     {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
                 ],
@@ -3597,12 +3601,11 @@ class StressTestServer(dl.BaseServiceRunner):
                             }
                         }
                     },
-                    "position": {"x": 10070, "y": 10206, "z": 0},
+                    "position": {"x": 100, "y": 200, "z": 0},
                     "componentGroupName": "automation",
                     "codeApplicationName": "stream-image",
                     "repeatable": True
                 },
-                "name": "stream-image",
                 "type": "code",
                 "namespace": {
                     "functionName": "stream_image",
@@ -3642,9 +3645,11 @@ class ServiceRunner:
                 }
             }
             
-            # ResNet model node
+            # ResNet model node (distinct name/displayName and position so graph shows two different nodes)
             resnet_node = {
                 "id": resnet_node_id,
+                "name": "resnet",
+                "displayName": f"ResNet ({model.name})",
                 "inputs": [
                     {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
                 ],
@@ -3653,13 +3658,12 @@ class ServiceRunner:
                     {"portId": "annotations", "type": "Annotation[]", "name": "annotations", "displayName": "annotations", "io": "output"}
                 ],
                 "metadata": {
-                    "position": {"x": 10405, "y": 10209, "z": 0},
+                    "position": {"x": 500, "y": 200, "z": 0},
                     "modelName": model.name,
                     "modelId": model.id,
                     "componentGroupName": "models",
                     "repeatable": True
                 },
-                "name": model.name,
                 "type": "ml",
                 "namespace": {
                     "functionName": "predict",

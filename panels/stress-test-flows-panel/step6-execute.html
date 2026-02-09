@@ -1457,6 +1457,7 @@
                     const total = data.total || (completed + inProgress) || 1;
                     const durationSeconds = data.duration_seconds;
                     const nodes = data.nodes || [];
+                    const perNodeAvailable = data.per_node_available === true;
                     document.getElementById('pipelineStatSuccess').textContent = success.toLocaleString();
                     document.getElementById('pipelineStatFailed').textContent = failed.toLocaleString();
                     document.getElementById('pipelineStatInProgress').textContent = inProgress.toLocaleString();
@@ -1483,7 +1484,7 @@
                     document.getElementById('pipelineStatsUpdated').textContent = 'Last updated ' + now.toLocaleTimeString();
                     const nodesSection = document.getElementById('pipelineStatsNodesSection');
                     const nodesContainer = document.getElementById('pipelineStatsNodes');
-                    if (nodes.length > 0) {
+                    if (nodes.length > 0 && perNodeAvailable) {
                         nodesSection.style.display = 'block';
                         nodesContainer.innerHTML = nodes.map(function(n) {
                             const s = n.success || 0, f = n.failed || 0, p = n.in_progress || 0;
@@ -1495,6 +1496,9 @@
                                 '<div><span style="font-size: 11px; color: var(--text-muted);">In progress</span><br><span style="color: var(--accent-warning); font-weight: 700;">' + p.toLocaleString() + '</span></div>' +
                                 '</div>';
                         }).join('');
+                    } else if (nodes.length > 0 && !perNodeAvailable) {
+                        nodesSection.style.display = 'block';
+                        nodesContainer.innerHTML = '<p style="font-size: 13px; color: var(--text-muted); margin: 0;">Per-node breakdown not provided by API. Totals above are pipeline-level.</p>';
                     } else {
                         nodesSection.style.display = 'none';
                     }
