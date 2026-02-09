@@ -1362,7 +1362,30 @@
         let pipelineStatsChartInstance = null;
         let pipelineStatsPollTimerId = null;
 
-        // Resolve pipeline_id from cache: current workflow (API or localStorage) or most recent saved workflow with pipeline_id
+        // Get pipeline_id from the currently running workflow (active workflow). Returns null if no workflow is running.
+        async function getPipelineIdFromRunningWorkflow() {
+            try {
+                const activeRes = await fetch(`${API_BASE_URL}/api/active-workflow`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+                if (!activeRes.ok) return null;
+                const active = await activeRes.json();
+                if (!active.running || !active.workflow_id) return null;
+                const progressRes = await fetch(`${API_BASE_URL}/api/workflow-progress/${active.workflow_id}`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+                if (!progressRes.ok) return null;
+                const progress = await progressRes.json();
+                const result = progress && progress.result;
+                if (!result || typeof result !== 'object') return null;
+                let pid = result.pipeline_id;
+                if (!pid && result.steps && Array.isArray(result.steps)) {
+                    const createStep = result.steps.find(s => s && s.step === 'create_pipeline');
+                    if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                }
+                return pid || null;
+            } catch (e) {
+                return null;
+            }
+        }
+
+        // Resolve pipeline_id from cache (no running check - use getPipelineIdFromRunningWorkflow in loadPipelineExecutionStats for that)
         async function getCachedPipelineId() {
             const input = document.getElementById('pipelineStatsPipelineId');
             if (input && input.value && input.value.trim()) return input.value.trim();
@@ -1411,15 +1434,14 @@
             const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
             const errorEl = document.getElementById('pipelineStatsError');
             const contentEl = document.getElementById('pipelineStatsContent');
-            let pipelineId = (pipelineIdInput && pipelineIdInput.value) ? pipelineIdInput.value.trim() : '';
+            const pipelineNameEl = document.getElementById('pipelineName');
+            const pipelineNameFromParams = (pipelineNameEl && pipelineNameEl.value) ? pipelineNameEl.value.trim() : '';
             (async function run() {
-                if (!pipelineId) {
-                    pipelineId = await getCachedPipelineId();
-                    if (pipelineId && pipelineIdInput) {
-                        pipelineIdInput.value = pipelineId;
-                    }
-                }
-                const pipelineNameFromParams = (document.getElementById('pipelineName') && document.getElementById('pipelineName').value) ? document.getElementById('pipelineName').value.trim() : '';
+                // 1) Pipeline from currently running test (active workflow); 2) manual Pipeline ID input; 3) cached/saved workflow; 4) Pipeline name field
+                let pipelineId = await getPipelineIdFromRunningWorkflow();
+                if (!pipelineId && pipelineIdInput && pipelineIdInput.value.trim()) pipelineId = pipelineIdInput.value.trim();
+                if (!pipelineId) pipelineId = await getCachedPipelineId();
+                if (pipelineId && pipelineIdInput) pipelineIdInput.value = pipelineId;
                 const useByName = !pipelineId && pipelineNameFromParams;
                 if (!pipelineId && !useByName) {
                     if (errorEl) { errorEl.style.display = 'none'; }
@@ -1559,10 +1581,10 @@
         }
         window.addEventListener('beforeunload', stopPipelineStatsPolling);
 
-        // Auto-fill pipeline_id from current workflow result when progress is received
+        // When progress is received (e.g. from run polling), use the workflow's pipeline so stats show the current run's pipeline
         function tryFillPipelineIdFromWorkflow(progress) {
             const input = document.getElementById('pipelineStatsPipelineId');
-            if (!input || input.value.trim()) return;
+            if (!input) return;
             const result = progress && progress.result;
             if (!result || typeof result !== 'object') return;
             let pipelineId = result.pipeline_id;
