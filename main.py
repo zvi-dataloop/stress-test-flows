@@ -748,9 +748,11 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     failed_count = count
                 elif status in ('in-progress', 'inprogress', 'running', 'pending'):
                     in_progress_count = count
-            # Per-node counters if present (try multiple possible API response shapes)
+                # aborted/terminated are not lumped into failed; display shows only success, failed, in progress
+            # Per-node counters: API uses nodeExecutionsCounters (with 's') and statusCount per node (see dtlpy PipelineStats/NodeCounters)
             node_counters = (
-                pipeline_stats.get('nodeExecutionCounters')
+                pipeline_stats.get('nodeExecutionsCounters')
+                or pipeline_stats.get('nodeExecutionCounters')
                 or pipeline_stats.get('nodeCounters')
                 or pipeline_stats.get('nodes')
                 or []
@@ -760,13 +762,23 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     node_id = nc.get('nodeId') or nc.get('node_id') or nc.get('id') or ''
                     node_name = nc.get('nodeName') or nc.get('node_name') or nc.get('name') or node_id
                     ns, nf, np = 0, 0, 0
-                    for c in (nc.get('counters') or nc.get('executionCounters') or [nc]):
+                    # SDK uses statusCount (list of {status, count}); also support counters/executionCounters
+                    raw_counts = nc.get('statusCount') or nc.get('counters') or nc.get('executionCounters') or [nc]
+                    for c in raw_counts:
                         st = (c.get('status') or '').lower()
                         cnt = int(c.get('count', 0))
-                        if st == 'success': ns = cnt
-                        elif st == 'failed': nf = cnt
-                        elif st in ('in-progress', 'inprogress', 'running', 'pending'): np = cnt
-                    existing = next((n for n in nodes_list if n.get('node_id') == node_id), None)
+                        if st == 'success':
+                            ns = cnt
+                        elif st == 'failed':
+                            nf = cnt
+                        elif st in ('in-progress', 'inprogress', 'running', 'pending'):
+                            np += cnt
+                        # aborted/terminated are not shown in Failed; only status "failed" is shown
+                    # Match by node_id or by node_name (API may use different id format than GET /pipelines)
+                    existing = next(
+                        (n for n in nodes_list if (n.get('node_id') == node_id or (node_name and n.get('node_name') == node_name))),
+                        None
+                    )
                     if existing:
                         existing['success'] = ns
                         existing['failed'] = nf
@@ -775,8 +787,13 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                         nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': ns, 'failed': nf, 'in_progress': np})
             completed = success_count + failed_count
             total = completed + in_progress_count
-            # Do NOT copy pipeline-level totals to every node when per-node counters are missing - that made both nodes show identical stats. Leave per-node at 0 when API doesn't provide nodeExecutionCounters.
+            # If API didn't return per-node counters, fill each node with pipeline-level totals so the UI can show counters; set per_node_available=False so the UI can label it as pipeline total.
             per_node_available = any((n.get('success') or n.get('failed') or n.get('in_progress')) for n in nodes_list)
+            if nodes_list and not per_node_available:
+                for n in nodes_list:
+                    n['success'] = success_count
+                    n['failed'] = failed_count
+                    n['in_progress'] = in_progress_count
             # 3) Duration: first execution to last (use raw API so we get JSON dates reliably)
             duration_seconds = None
             def _parse_ts(v):
