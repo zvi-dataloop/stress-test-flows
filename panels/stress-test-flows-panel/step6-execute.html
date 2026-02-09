@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Step 6: Execute Pipeline - Nginx Stress-Test</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         :root {
             --bg-primary: #ffffff; --bg-secondary: #f8fafc; --bg-tertiary: #f1f5f9; --bg-card: #ffffff;
@@ -278,6 +279,86 @@
                 <li><span class="check-icon">✓</span>Pipeline created with ResNet function</li>
                 <li><span class="check-icon">✓</span>Monitoring dashboards ready</li>
             </ul>
+        </div>
+
+        <!-- Nginx / Serve Agent RPS (Prometheus metrics) -->
+        <div class="card" id="nginxRpsCard">
+            <h2>Nginx Response Codes (Serve Agent &amp; Nginx Controller)</h2>
+            <p style="margin-bottom: 12px; color: var(--text-secondary); font-size: 14px;">Requests per second by status class. Data from Prometheus: <code>nginx_gateway_request_duration_seconds_count</code> (2xx, 4xx, 5xx).</p>
+            <div style="position: relative; height: 280px;">
+                <canvas id="nginxRpsChart" style="max-height: 280px;"></canvas>
+            </div>
+            <div style="margin-top: 8px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+                <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Time range:</label>
+                <select id="nginxRpsRange" style="padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px;">
+                    <option value="3600">Last 1 hour</option>
+                    <option value="10800">Last 3 hours</option>
+                    <option value="21600" selected>Last 6 hours</option>
+                    <option value="43200">Last 12 hours</option>
+                    <option value="86400">Last 24 hours</option>
+                </select>
+                <button type="button" class="btn btn-secondary" id="refreshNginxRpsBtn" style="padding: 8px 16px; font-size: 13px;">↻ Refresh</button>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                    <input type="checkbox" id="nginxRpsLive" checked>
+                    Live (auto-refresh every 30s)
+                </label>
+                <span id="nginxRpsStatus" style="font-size: 12px; color: var(--text-muted);"></span>
+            </div>
+        </div>
+
+        <!-- Pipeline execution summary (success / failed / in progress) -->
+        <div class="card" id="pipelineStatsCard">
+            <h2>Pipeline execution summary</h2>
+            <p style="margin-bottom: 16px; color: var(--text-secondary); font-size: 14px;">Execution counts for the pipeline: how many items finished successfully, failed, or are still in progress. Pipeline ID is filled automatically from the current run; when not cached, the pipeline name from the parameters above and project ID (from server) are used.</p>
+            <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;">
+                <label style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Pipeline ID:</label>
+                <input type="text" id="pipelineStatsPipelineId" placeholder="Auto-filled when a run is in progress, or paste pipeline ID" style="flex: 1; min-width: 200px; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 13px; font-family: monospace;">
+                <button type="button" class="btn btn-primary" id="pipelineStatsLoadBtn" style="padding: 8px 20px;">Load stats</button>
+                <label style="display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text-secondary); cursor: pointer;">
+                    <input type="checkbox" id="pipelineStatsLive" checked>
+                    Live (refresh every 15s)
+                </label>
+            </div>
+            <div id="pipelineStatsError" style="display: none; padding: 12px; background: rgba(239,68,68,0.1); border-radius: 8px; color: var(--accent-danger); font-size: 13px; margin-bottom: 12px;"></div>
+            <div id="pipelineStatsContent" style="display: none;">
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px;">
+                    <div class="pipeline-stat-box" style="background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-success); margin-bottom: 4px;">Success</div>
+                        <div id="pipelineStatSuccess" style="font-size: 28px; font-weight: 800; color: var(--accent-success);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-danger); margin-bottom: 4px;">Failed</div>
+                        <div id="pipelineStatFailed" style="font-size: 28px; font-weight: 800; color: var(--accent-danger);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-warning); margin-bottom: 4px;">In progress</div>
+                        <div id="pipelineStatInProgress" style="font-size: 28px; font-weight: 800; color: var(--accent-warning);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: var(--bg-tertiary); border: 1px solid var(--border-color); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); margin-bottom: 4px;">Total completed</div>
+                        <div id="pipelineStatCompleted" style="font-size: 28px; font-weight: 800; color: var(--text-primary);">0</div>
+                    </div>
+                    <div class="pipeline-stat-box" style="background: rgba(14,165,233,0.12); border: 1px solid rgba(14,165,233,0.4); border-radius: 12px; padding: 16px; text-align: center;">
+                        <div style="font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; color: var(--accent-primary); margin-bottom: 4px;">Time taken</div>
+                        <div id="pipelineStatDuration" style="font-size: 22px; font-weight: 800; color: var(--accent-primary);">—</div>
+                    </div>
+                </div>
+                <div style="display: flex; gap: 24px; flex-wrap: wrap; align-items: flex-start;">
+                    <div style="flex: 0 0 220px;">
+                        <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">By status</div>
+                        <canvas id="pipelineStatsChart" style="max-width: 220px; max-height: 220px;"></canvas>
+                    </div>
+                    <div style="flex: 1; min-width: 200px;">
+                        <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 8px;">Summary</div>
+                        <p id="pipelineStatsSummary" style="font-size: 14px; color: var(--text-secondary); line-height: 1.6; margin: 0;"></p>
+                        <p id="pipelineStatsUpdated" style="font-size: 11px; color: var(--text-muted); margin-top: 8px;"></p>
+                    </div>
+                </div>
+                <div id="pipelineStatsNodesSection" style="margin-top: 24px; display: none;">
+                    <div style="font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 12px;">Executions per pipeline node (successful, failed, in progress)</div>
+                    <div id="pipelineStatsNodes" style="display: grid; gap: 12px;"></div>
+                </div>
+            </div>
         </div>
 
         <div class="nav-buttons">
@@ -972,6 +1053,11 @@
                         lastLogCount = logs.length;
                     }
                     
+                    // Auto-fill pipeline ID in execution summary when result has pipeline_id (e.g. after create_pipeline step)
+                    if (progress.result && typeof window.tryFillPipelineIdFromWorkflow === 'function') {
+                        window.tryFillPipelineIdFromWorkflow(progress);
+                    }
+                    
                     // Check if workflow is complete, cancelled, or cancelling
                     if (status === 'completed' || status === 'cancelled' || status === 'cancelling') {
                         // Clear batch progress line when workflow completes
@@ -1176,6 +1262,335 @@
                 console.error('Failed to restore workflow:', e);
             }
         });
+
+        // Nginx RPS chart (Prometheus: serve agent & nginx controller) with live polling
+        const NGINX_RPS_POLL_MS = 30000; // 30 seconds
+        let nginxRpsChartInstance = null;
+        let nginxRpsPollTimerId = null;
+        function getNginxRpsStepSeconds(rangeSeconds) {
+            if (rangeSeconds <= 3600) return 15;
+            if (rangeSeconds <= 21600) return 60;   // 6h -> 1 min step
+            if (rangeSeconds <= 43200) return 120;  // 12h -> 2 min step
+            return 300;  // 24h -> 5 min step
+        }
+        function getNginxRpsRangeLabel(seconds) {
+            const h = seconds / 3600;
+            return h === 1 ? '1 hour' : h + ' hours';
+        }
+        function startNginxRpsPolling() {
+            if (nginxRpsPollTimerId) return;
+            nginxRpsPollTimerId = setInterval(loadNginxRpsChart, NGINX_RPS_POLL_MS);
+        }
+        function stopNginxRpsPolling() {
+            if (nginxRpsPollTimerId) {
+                clearInterval(nginxRpsPollTimerId);
+                nginxRpsPollTimerId = null;
+            }
+        }
+        function loadNginxRpsChart() {
+            const statusEl = document.getElementById('nginxRpsStatus');
+            const canvas = document.getElementById('nginxRpsChart');
+            const rangeSelect = document.getElementById('nginxRpsRange');
+            if (!canvas) return;
+            const rangeSeconds = rangeSelect ? parseInt(rangeSelect.value, 10) || 3600 : 3600;
+            const stepSeconds = getNginxRpsStepSeconds(rangeSeconds);
+            if (statusEl) statusEl.textContent = 'Loading…';
+            fetch(`${API_BASE_URL}/api/nginx-rps?range=${rangeSeconds}&step=${stepSeconds}`)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        if (statusEl) statusEl.textContent = 'Error: ' + data.error;
+                        if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                        nginxRpsChartInstance = null;
+                        return;
+                    }
+                    const toPoints = (arr) => (arr || []).map(([t, v]) => ({ x: t, y: Math.round(v * 100) / 100 }));
+                    const datasets = [
+                        { label: '2xx', data: toPoints(data['2xx']), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: false, tension: 0.2 },
+                        { label: '4xx', data: toPoints(data['4xx']), borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.1)', fill: false, tension: 0.2 },
+                        { label: '5xx', data: toPoints(data['5xx']), borderColor: '#ef4444', backgroundColor: 'rgba(239, 68, 68, 0.1)', fill: false, tension: 0.2 }
+                    ];
+                    const formatTime = (ts) => {
+                        const d = new Date(ts * 1000);
+                        return d.getHours().toString().padStart(2,'0') + ':' + d.getMinutes().toString().padStart(2,'0');
+                    };
+                    if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                    nginxRpsChartInstance = new Chart(canvas, {
+                        type: 'line',
+                        data: { datasets },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            interaction: { intersect: false, mode: 'index' },
+                            plugins: { legend: { position: 'top' } },
+                            scales: {
+                                x: {
+                                    type: 'linear',
+                                    title: { display: true, text: 'Time' },
+                                    ticks: { callback: (v) => formatTime(v), maxTicksLimit: 12 }
+                                },
+                                y: { beginAtZero: true, title: { display: true, text: 'req/s' } }
+                            }
+                        }
+                    });
+                    const now = new Date();
+                    const timeStr = now.getHours().toString().padStart(2,'0') + ':' + now.getMinutes().toString().padStart(2,'0') + ':' + now.getSeconds().toString().padStart(2,'0');
+                    if (statusEl) statusEl.textContent = 'Last ' + getNginxRpsRangeLabel(rangeSeconds) + ', step ' + stepSeconds + 's. Last updated ' + timeStr + ' (auto-refresh every 30s).';
+                })
+                .catch(e => {
+                    if (statusEl) statusEl.textContent = 'Failed to load: ' + e.message;
+                    if (nginxRpsChartInstance) nginxRpsChartInstance.destroy();
+                    nginxRpsChartInstance = null;
+                });
+        }
+        const refreshNginxBtn = document.getElementById('refreshNginxRpsBtn');
+        if (refreshNginxBtn) refreshNginxBtn.addEventListener('click', loadNginxRpsChart);
+        const nginxRpsRangeSelect = document.getElementById('nginxRpsRange');
+        if (nginxRpsRangeSelect) nginxRpsRangeSelect.addEventListener('change', loadNginxRpsChart);
+        const nginxRpsLiveCheckbox = document.getElementById('nginxRpsLive');
+        if (nginxRpsLiveCheckbox) {
+            nginxRpsLiveCheckbox.addEventListener('change', function() {
+                if (this.checked) startNginxRpsPolling(); else stopNginxRpsPolling();
+            });
+        }
+        loadNginxRpsChart();
+        startNginxRpsPolling();
+        window.addEventListener('beforeunload', stopNginxRpsPolling);
+
+        // Pipeline execution summary (success / failed / in progress)
+        const PIPELINE_STATS_POLL_MS = 15000;
+        let pipelineStatsChartInstance = null;
+        let pipelineStatsPollTimerId = null;
+
+        // Resolve pipeline_id from cache: current workflow (API or localStorage) or most recent saved workflow with pipeline_id
+        async function getCachedPipelineId() {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            if (input && input.value && input.value.trim()) return input.value.trim();
+            const workflowId = currentWorkflowId || localStorage.getItem(STORAGE_KEY_CURRENT_WORKFLOW);
+            if (workflowId) {
+                try {
+                    const res = await fetch(`${API_BASE_URL}/api/workflow-progress/${workflowId}`, { method: 'GET', headers: { 'Content-Type': 'application/json' } });
+                    if (res.ok) {
+                        const progress = await res.json();
+                        const result = progress && progress.result;
+                        if (result && typeof result === 'object') {
+                            let pid = result.pipeline_id;
+                            if (!pid && result.steps && Array.isArray(result.steps)) {
+                                const createStep = result.steps.find(s => s && s.step === 'create_pipeline');
+                                if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                            }
+                            if (pid) return pid;
+                        }
+                    }
+                } catch (e) { /* ignore */ }
+                const saved = loadWorkflowProgress(workflowId);
+                if (saved && saved.result) {
+                    let pid = saved.result.pipeline_id;
+                    if (!pid && saved.result.steps && Array.isArray(saved.result.steps)) {
+                        const createStep = saved.result.steps.find(s => s && s.step === 'create_pipeline');
+                        if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                    }
+                    if (pid) return pid;
+                }
+            }
+            const all = getAllSavedWorkflows();
+            const entries = Object.entries(all).filter(([_, p]) => p && p.result && (p.result.pipeline_id || (p.result.steps && p.result.steps.some(s => s && s.result && s.result.pipeline_id))));
+            entries.sort((a, b) => (b[1].lastUpdated || 0) - (a[1].lastUpdated || 0));
+            for (const [, p] of entries) {
+                let pid = p.result.pipeline_id;
+                if (!pid && p.result.steps) {
+                    const createStep = p.result.steps.find(s => s && s.step === 'create_pipeline');
+                    if (createStep && createStep.result && createStep.result.pipeline_id) pid = createStep.result.pipeline_id;
+                }
+                if (pid) return pid;
+            }
+            return null;
+        }
+
+        function loadPipelineExecutionStats() {
+            const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
+            const errorEl = document.getElementById('pipelineStatsError');
+            const contentEl = document.getElementById('pipelineStatsContent');
+            let pipelineId = (pipelineIdInput && pipelineIdInput.value) ? pipelineIdInput.value.trim() : '';
+            (async function run() {
+                if (!pipelineId) {
+                    pipelineId = await getCachedPipelineId();
+                    if (pipelineId && pipelineIdInput) {
+                        pipelineIdInput.value = pipelineId;
+                    }
+                }
+                const pipelineNameFromParams = (document.getElementById('pipelineName') && document.getElementById('pipelineName').value) ? document.getElementById('pipelineName').value.trim() : '';
+                const useByName = !pipelineId && pipelineNameFromParams;
+                if (!pipelineId && !useByName) {
+                    if (errorEl) { errorEl.style.display = 'none'; }
+                    if (contentEl) { contentEl.style.display = 'none'; }
+                    return;
+                }
+                if (errorEl) { errorEl.style.display = 'none'; }
+                let url = `${API_BASE_URL}/api/pipeline-execution-stats?`;
+                if (pipelineId) {
+                    url += `pipeline_id=${encodeURIComponent(pipelineId)}`;
+                } else {
+                    url += `pipeline_name=${encodeURIComponent(pipelineNameFromParams)}`;
+                }
+                if (pipelineId && document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+                fetch(url)
+                .then(r => r.json())
+                .then(data => {
+                    if (data.error) {
+                        if (errorEl) {
+                            errorEl.textContent = data.error;
+                            errorEl.style.display = 'block';
+                        }
+                        if (contentEl) contentEl.style.display = 'none';
+                        return;
+                    }
+                    if (contentEl) contentEl.style.display = 'block';
+                    if (useByName && data.pipeline_id && pipelineIdInput) {
+                        pipelineIdInput.value = data.pipeline_id;
+                        if (document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+                    }
+                    const success = data.success || 0;
+                    const failed = data.failed || 0;
+                    const inProgress = data.in_progress || 0;
+                    const completed = data.completed || (success + failed);
+                    const total = data.total || (completed + inProgress) || 1;
+                    const durationSeconds = data.duration_seconds;
+                    const nodes = data.nodes || [];
+                    const perNodeAvailable = data.per_node_available === true;
+                    document.getElementById('pipelineStatSuccess').textContent = success.toLocaleString();
+                    document.getElementById('pipelineStatFailed').textContent = failed.toLocaleString();
+                    document.getElementById('pipelineStatInProgress').textContent = inProgress.toLocaleString();
+                    document.getElementById('pipelineStatCompleted').textContent = completed.toLocaleString();
+                    function formatDuration(sec) {
+                        if (sec == null || sec < 0) return '—';
+                        if (sec < 60) return sec + 's';
+                        const m = Math.floor(sec / 60);
+                        const s = sec % 60;
+                        if (m < 60) return s > 0 ? m + 'm ' + s + 's' : m + 'm';
+                        const h = Math.floor(m / 60);
+                        const mm = m % 60;
+                        return mm > 0 ? h + 'h ' + mm + 'm' : h + 'h';
+                    }
+                    document.getElementById('pipelineStatDuration').textContent = formatDuration(durationSeconds);
+                    const pctDone = total > 0 ? Math.round((completed / total) * 100) : 0;
+                    const successPct = completed > 0 ? Math.round((success / completed) * 100) : 0;
+                    document.getElementById('pipelineStatsSummary').innerHTML =
+                        `<strong>${completed.toLocaleString()}</strong> of <strong>${total.toLocaleString()}</strong> items completed (${pctDone}%). ` +
+                        (completed > 0 ? `<strong>${successPct}%</strong> of completed items succeeded. ` : '') +
+                        (durationSeconds != null ? `Time taken: <strong>${formatDuration(durationSeconds)}</strong>. ` : '') +
+                        (inProgress > 0 ? `<strong>${inProgress.toLocaleString()}</strong> items still in progress.` : 'All items have finished.');
+                    const now = new Date();
+                    document.getElementById('pipelineStatsUpdated').textContent = 'Last updated ' + now.toLocaleTimeString();
+                    const nodesSection = document.getElementById('pipelineStatsNodesSection');
+                    const nodesContainer = document.getElementById('pipelineStatsNodes');
+                    if (nodes.length > 0) {
+                        nodesSection.style.display = 'block';
+                        const pipelineTotalNote = !perNodeAvailable ? '<p style="font-size: 11px; color: var(--text-muted); margin: 0 0 10px 0;">Pipeline total shown per node (per-node breakdown not provided by API).</p>' : '';
+                        nodesContainer.innerHTML = pipelineTotalNote + nodes.map(function(n) {
+                            const s = n.success || 0, f = n.failed || 0, p = n.in_progress || 0;
+                            const summary = s.toLocaleString() + ' successful, ' + f.toLocaleString() + ' failed, ' + p.toLocaleString() + ' in progress';
+                            return '<div style="display: grid; grid-template-columns: minmax(120px, auto) 1fr 1fr 1fr; gap: 12px; align-items: center; padding: 12px 16px; background: var(--bg-tertiary); border-radius: 10px; border: 1px solid var(--border-color);">' +
+                                '<div><span style="font-weight: 600; color: var(--text-primary);">' + (n.node_name || n.node_id || 'Node') + '</span><br><span style="font-size: 11px; color: var(--text-muted);">' + summary + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">Successful executions</span><br><span style="color: var(--accent-success); font-weight: 700;">' + s.toLocaleString() + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">Failed</span><br><span style="color: var(--accent-danger); font-weight: 700;">' + f.toLocaleString() + '</span></div>' +
+                                '<div><span style="font-size: 11px; color: var(--text-muted);">In progress</span><br><span style="color: var(--accent-warning); font-weight: 700;">' + p.toLocaleString() + '</span></div>' +
+                                '</div>';
+                        }).join('');
+                    } else {
+                        nodesSection.style.display = 'none';
+                    }
+                    const canvas = document.getElementById('pipelineStatsChart');
+                    if (canvas && typeof Chart !== 'undefined') {
+                        if (pipelineStatsChartInstance) pipelineStatsChartInstance.destroy();
+                        const hasAny = success > 0 || failed > 0 || inProgress > 0;
+                        pipelineStatsChartInstance = new Chart(canvas, {
+                            type: 'doughnut',
+                            data: {
+                                labels: ['Success', 'Failed', 'In progress'],
+                                datasets: [{
+                                    data: hasAny ? [success, failed, inProgress] : [1],
+                                    backgroundColor: hasAny ? ['#10b981', '#ef4444', '#f59e0b'] : ['#e2e8f0'],
+                                    borderWidth: 0
+                                }]
+                            },
+                            options: {
+                                responsive: true,
+                                maintainAspectRatio: true,
+                                plugins: {
+                                    legend: { position: 'bottom' }
+                                },
+                                cutout: '55%'
+                            }
+                        });
+                    }
+                })
+                .catch(e => {
+                    if (errorEl) {
+                        errorEl.textContent = 'Failed to load: ' + e.message;
+                        errorEl.style.display = 'block';
+                    }
+                    if (contentEl) contentEl.style.display = 'none';
+                });
+            })();
+        }
+        function startPipelineStatsPolling() {
+            if (pipelineStatsPollTimerId) return;
+            const pipelineIdInput = document.getElementById('pipelineStatsPipelineId');
+            if (!(pipelineIdInput && pipelineIdInput.value && pipelineIdInput.value.trim())) return;
+            pipelineStatsPollTimerId = setInterval(loadPipelineExecutionStats, PIPELINE_STATS_POLL_MS);
+        }
+        function stopPipelineStatsPolling() {
+            if (pipelineStatsPollTimerId) {
+                clearInterval(pipelineStatsPollTimerId);
+                pipelineStatsPollTimerId = null;
+            }
+        }
+        const pipelineStatsLoadBtn = document.getElementById('pipelineStatsLoadBtn');
+        if (pipelineStatsLoadBtn) pipelineStatsLoadBtn.addEventListener('click', function() {
+            loadPipelineExecutionStats();
+            if (document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+        });
+        const pipelineStatsLiveCheckbox = document.getElementById('pipelineStatsLive');
+        if (pipelineStatsLiveCheckbox) {
+            pipelineStatsLiveCheckbox.addEventListener('change', function() {
+                if (this.checked) startPipelineStatsPolling(); else stopPipelineStatsPolling();
+            });
+        }
+        window.addEventListener('beforeunload', stopPipelineStatsPolling);
+
+        // Auto-fill pipeline_id from current workflow result when progress is received
+        function tryFillPipelineIdFromWorkflow(progress) {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            if (!input || input.value.trim()) return;
+            const result = progress && progress.result;
+            if (!result || typeof result !== 'object') return;
+            let pipelineId = result.pipeline_id;
+            if (!pipelineId && result.steps && Array.isArray(result.steps)) {
+                const createStep = result.steps.find(s => s && s.step === 'create_pipeline');
+                if (createStep && createStep.result && createStep.result.pipeline_id)
+                    pipelineId = createStep.result.pipeline_id;
+            }
+            if (pipelineId) {
+                input.value = pipelineId;
+                loadPipelineExecutionStats();
+                if (pipelineStatsLiveCheckbox && pipelineStatsLiveCheckbox.checked) startPipelineStatsPolling();
+            }
+        }
+        // Expose for progress polling to call when workflow has pipeline_id
+        window.tryFillPipelineIdFromWorkflow = tryFillPipelineIdFromWorkflow;
+
+        // On page load: fill pipeline ID from cache when available, then always load stats (cached ID or pipeline name from params)
+        function loadPipelineStatsOnEnter() {
+            const input = document.getElementById('pipelineStatsPipelineId');
+            getCachedPipelineId().then(function(pid) {
+                if (pid && input && !input.value.trim()) input.value = pid;
+                loadPipelineExecutionStats();
+                if (document.getElementById('pipelineStatsLive') && document.getElementById('pipelineStatsLive').checked) startPipelineStatsPolling();
+            });
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', loadPipelineStatsOnEnter);
+        else loadPipelineStatsOnEnter();
     </script>
 </body>
 </html>

@@ -45,6 +45,9 @@ execution_status = {}
 # Store workflow progress for real-time updates
 workflow_progress = {}  # workflow_id -> {status, current_step, progress_pct, logs, result, error}
 
+# Prometheus URL for Nginx RPS metrics (same namespace: prometheus:9090)
+PROMETHEUS_URL = os.environ.get('PROMETHEUS_URL', 'http://prometheus:3000').rstrip('/')
+
 # Global reference to the server instance (set by StressTestServer.__init__)
 _stress_test_server_instance = None
 
@@ -310,73 +313,87 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         # Don't use directory parameter - we'll handle paths manually
         super().__init__(*args, **kwargs)
 
-    
+    def log_message(self, format, *args):
+        """Log requests at INFO so 200 responses are not captured as ERROR (base class logs to stderr and is often treated as ERROR by platforms)."""
+        msg = format % args if args else format
+        logger.info("%s - - [%s] %s", self.address_string(), self.log_date_time_string(), msg)
+
     def do_GET(self):
-        """Handle GET requests"""
-        parsed = urlparse(self.path)
-        path = parsed.path
-        
-        logger.info(f"GET request received: {path} (full path: {self.path})")
-        
-        # Normalize path - handle multiple possible formats
-        original_path = path
-        
-        # Remove common prefixes that might be added by Dataloop/Tornado
-        # Handle: /stress-test-panel/, /panels/stress-test-panel/, /api/v1/apps/.../panels/stress-test-panel/
-        prefixes_to_remove = [
-            '/api/v1/apps/nginx-stress-test-flows-env2/panels/stress-test-panel',
-            '/api/v1/apps/nginx-stress-test-flows-env2/panels',
-            '/panels/stress-test-panel',
-            '/stress-test-panel'
-        ]
-        
-        for prefix in prefixes_to_remove:
-            if path.startswith(prefix + '/'):
-                path = path[len(prefix):]
-                logger.info(f"Removed prefix '{prefix}': {original_path} -> {path}")
-                break
-            elif path == prefix:
-                path = '/'
-                logger.info(f"Matched exact prefix '{prefix}': {original_path} -> {path}")
-                break
-        
-        # API endpoints - check after prefix removal
-        if path == '/api/health' or path.startswith('/api/health'):
-            logger.info("Serving /api/health")
-            self._send_json({'status': 'ok', 'service': 'stress-test-server'})
-        elif path == '/api/project' or path.startswith('/api/project'):
-            self._get_project_info()
-        elif path == '/api/datasets' or path.startswith('/api/datasets'):
-            self._list_datasets()
-        elif path == '/api/pipelines' or path.startswith('/api/pipelines'):
-            self._list_pipelines()
-        elif path.startswith('/api/logs/'):
-            execution_id = path.split('/')[-1]
-            self._get_execution_logs(execution_id)
-        elif path.startswith('/api/execution/'):
-            execution_id = path.split('/')[-1]
-            self._get_execution_status(execution_id)
-        elif path.startswith('/api/workflow-progress/'):
-            workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
-            self._get_workflow_progress(workflow_id)
-        elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
-            self._get_active_workflow()
-        elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
-            self._list_gcs_integrations()
-        elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
-            self._list_faas_proxy_drivers()
-        elif path == '/api/org-access' or path.startswith('/api/org-access'):
-            self._check_org_access()
-        else:
-            # Handle static file paths
-            # Ensure root path serves index.html
-            if path == '/' or path == '':
-                path = '/index.html'
-                logger.info(f"Root path, serving index.html")
-            
-            logger.info(f"Serving static file: {path} (from original: {original_path})")
-            # Serve static files
-            self._serve_static_file(path)
+        """Handle GET requests. Wrapped in try/except so service never crashes (platform health checks keep working)."""
+        path = ''
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            logger.info(f"GET request received: {path} (full path: {self.path})")
+            # Handle /metrics first (before any path rewriting) so platform scrapers always get 200 and pod is not restarted
+            if path == '/metrics' or path.rstrip('/') == '/metrics':
+                self._serve_metrics()
+                return
+            original_path = path
+            # Remove common prefixes that might be added by Dataloop/Tornado
+            prefixes_to_remove = [
+                '/api/v1/apps/nginx-stress-test-flows-env2/panels/stress-test-panel',
+                '/api/v1/apps/nginx-stress-test-flows-env2/panels',
+                '/panels/stress-test-panel',
+                '/stress-test-panel'
+            ]
+            for prefix in prefixes_to_remove:
+                if path.startswith(prefix + '/'):
+                    path = path[len(prefix):]
+                    logger.info(f"Removed prefix '{prefix}': {original_path} -> {path}")
+                    break
+                elif path == prefix:
+                    path = '/'
+                    logger.info(f"Matched exact prefix '{prefix}': {original_path} -> {path}")
+                    break
+            # API endpoints - check after prefix removal
+            if path == '/api/health' or path.startswith('/api/health'):
+                logger.info("Serving /api/health")
+                self._send_json({'status': 'ok', 'service': 'stress-test-server'})
+            elif path == '/api/project' or path.startswith('/api/project'):
+                self._get_project_info()
+            elif path == '/api/datasets' or path.startswith('/api/datasets'):
+                self._list_datasets()
+            elif path == '/api/pipelines' or path.startswith('/api/pipelines'):
+                self._list_pipelines()
+            elif path.startswith('/api/logs/'):
+                execution_id = path.split('/')[-1]
+                self._get_execution_logs(execution_id)
+            elif path.startswith('/api/execution/'):
+                execution_id = path.split('/')[-1]
+                self._get_execution_status(execution_id)
+            elif path.startswith('/api/workflow-progress/'):
+                workflow_id = path.split('/api/workflow-progress/')[1].split('/')[0]
+                self._get_workflow_progress(workflow_id)
+            elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
+                self._get_active_workflow()
+            elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
+                self._list_gcs_integrations()
+            elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
+                self._list_faas_proxy_drivers()
+            elif path == '/api/org-access' or path.startswith('/api/org-access'):
+                self._check_org_access()
+            elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
+                self._get_nginx_rps_metrics(self.path)
+            elif path == '/api/pipeline-execution-stats' or path.startswith('/api/pipeline-execution-stats'):
+                self._get_pipeline_execution_stats(self.path)
+            else:
+                if path == '/' or path == '':
+                    path = '/index.html'
+                    logger.info(f"Root path, serving index.html")
+                logger.info(f"Serving static file: {path} (from original: {original_path})")
+                self._serve_static_file(path)
+        except Exception as e:
+            logger.error(f"GET handler error: {e}", exc_info=True)
+            if path == '/metrics' or (path and path.rstrip('/') == '/metrics'):
+                self._serve_metrics()
+            elif path == '/api/health' or (path and path.startswith('/api/health')):
+                self._send_json({'status': 'error', 'service': 'stress-test-server'}, status=200)
+            else:
+                try:
+                    self._send_error(500, str(e)[:200])
+                except Exception:
+                    pass
     
     def _serve_static_file(self, path):
         """Serve static files with proper path handling"""
@@ -473,28 +490,33 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             self._send_error(500, str(e))
     
     def do_POST(self):
-        """Handle POST requests"""
-        parsed = urlparse(self.path)
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
-        
+        """Handle POST requests. Wrapped in try/except so service never crashes."""
         try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            self._send_error(400, 'Invalid JSON')
-            return
-        
-        if parsed.path == '/api/execute':
-            self._execute_service_function(data)
-        elif parsed.path == '/api/run-full':
-            self._run_full_workflow(data)
-        elif parsed.path == '/api/create-faas-proxy-driver':
-            self._create_faas_proxy_driver(data)
-        elif parsed.path.startswith('/api/cancel-workflow/'):
-            workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
-            self._cancel_workflow(workflow_id)
-        else:
-            self._send_error(404, 'Not Found')
+            parsed = urlparse(self.path)
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8') if content_length > 0 else '{}'
+            try:
+                data = json.loads(body) if body else {}
+            except json.JSONDecodeError:
+                self._send_error(400, 'Invalid JSON')
+                return
+            if parsed.path == '/api/execute':
+                self._execute_service_function(data)
+            elif parsed.path == '/api/run-full':
+                self._run_full_workflow(data)
+            elif parsed.path == '/api/create-faas-proxy-driver':
+                self._create_faas_proxy_driver(data)
+            elif parsed.path.startswith('/api/cancel-workflow/'):
+                workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
+                self._cancel_workflow(workflow_id)
+            else:
+                self._send_error(404, 'Not Found')
+        except Exception as e:
+            logger.error(f"POST handler error: {e}", exc_info=True)
+            try:
+                self._send_error(500, str(e)[:200])
+            except Exception:
+                pass
     
     def _send_json(self, data, status=200):
         """Send JSON response"""
@@ -596,6 +618,320 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 'message': str(e)
             })
     
+    def _get_nginx_rps_metrics(self, path):
+        """Proxy Prometheus query_range for Nginx gateway RPS (2xx, 4xx, 5xx). GET /api/nginx-rps?start=&end=&step=15s (default: last 1h, step 15s)."""
+        try:
+            parsed = urlparse(path)
+            qs = parse_qs(parsed.query or '')
+            end_ts = int(time.time())
+            range_sec = 3600  # 1 hour
+            step_sec = 15
+            if qs.get('range'):
+                try:
+                    range_sec = int(qs['range'][0])
+                except (ValueError, IndexError):
+                    pass
+            if qs.get('step'):
+                try:
+                    step_sec = int(qs['step'][0].replace('s', '').replace('m', ''))
+                    if 'm' in (qs['step'][0] or ''):
+                        step_sec *= 60
+                except (ValueError, IndexError, AttributeError):
+                    pass
+            start_ts = end_ts - range_sec
+            step_str = f'{step_sec}s'
+            queries = {
+                '2xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="2xx",job="kubernetes-service-endpoints"}[1m]))',
+                '4xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="4xx",job="kubernetes-service-endpoints"}[1m]))',
+                '5xx': 'sum(rate(nginx_gateway_request_duration_seconds_count{status_class="5xx",job="kubernetes-service-endpoints"}[1m]))',
+            }
+            out = {'2xx': [], '4xx': [], '5xx': [], 'error': None}
+            for status, expr in queries.items():
+                try:
+                    r = requests.get(
+                        f'{PROMETHEUS_URL}/api/v1/query_range',
+                        params={'query': expr, 'start': start_ts, 'end': end_ts, 'step': step_str},
+                        timeout=10
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                    if data.get('status') != 'success' or data.get('data', {}).get('resultType') != 'matrix':
+                        out[status] = []
+                        continue
+                    results = data.get('data', {}).get('result', [])
+                    if not results:
+                        out[status] = []
+                        continue
+                    values = results[0].get('values', [])
+                    out[status] = [[int(t), float(v)] for t, v in values]
+                except Exception as e:
+                    logger.warning(f"Prometheus query for {status} failed: {e}")
+                    out[status] = []
+                    out['error'] = out['error'] or str(e)
+            self._send_json(out)
+        except Exception as e:
+            logger.error(f"Nginx RPS metrics error: {e}", exc_info=True)
+            self._send_json({'2xx': [], '4xx': [], '5xx': [], 'error': str(e)})
+    
+    def _get_pipeline_execution_stats(self, path):
+        """GET /api/pipeline-execution-stats?pipeline_id=xxx OR ?pipeline_name=...&project_id=... - return execution counts (success, failed, in_progress), duration, and per-node stats."""
+        def _send_err(msg):
+            self._send_json({'error': msg, 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
+        try:
+            parsed = urlparse(path)
+            qs = parse_qs(parsed.query or '')
+            pipeline_id = (qs.get('pipeline_id') or [None])[0] if qs.get('pipeline_id') else None
+            pipeline_name = (qs.get('pipeline_name') or [None])[0] if qs.get('pipeline_name') else None
+            project_id = (qs.get('project_id') or [None])[0] if qs.get('project_id') else None
+            project_name = (qs.get('project_name') or [None])[0] if qs.get('project_name') else None
+            if pipeline_id:
+                pipeline_id = pipeline_id.strip()
+            if pipeline_name:
+                pipeline_name = pipeline_name.strip()
+            if project_id:
+                project_id = project_id.strip()
+            if project_name:
+                project_name = project_name.strip()
+            if not pipeline_id and (not pipeline_name or not (project_id or project_name or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID'))):
+                _send_err('Provide pipeline_id or (pipeline_name and project_id or project_name, or set PROJECT_ID)')
+                return
+            if not pipeline_id and pipeline_name:
+                try:
+                    if project_id:
+                        project = dl.projects.get(project_id=project_id)
+                    elif project_name:
+                        project = dl.projects.get(project_name=project_name)
+                    else:
+                        proj_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+                        if not proj_id:
+                            _send_err('project_id or project_name is required when using pipeline_name')
+                            return
+                        project = dl.projects.get(project_id=proj_id)
+                    pipeline = project.pipelines.get(pipeline_name=pipeline_name)
+                    pipeline_id = pipeline.id
+                except Exception as e:
+                    _send_err(f'Pipeline by name failed: {e}')
+                    return
+            headers = {'Authorization': f'Bearer {dl.token()}'}
+            base_url = (dl.environment() or '').strip().rstrip('/')
+            if not base_url:
+                self._send_json({'error': 'Could not determine API base URL', 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': [], 'duration_seconds': None})
+                return
+            # 1) Get pipeline details for node list
+            nodes_list = []
+            try:
+                pipe_response = requests.get(f"{base_url}/pipelines/{pipeline_id}", headers=headers, timeout=10)
+                if pipe_response.status_code == 200:
+                    pipe_data = pipe_response.json()
+                    for n in pipe_data.get('nodes') or pipe_data.get('composition', {}).get('nodes') or []:
+                        node_id = n.get('id') or n.get('nodeId') or ''
+                        node_name = n.get('name') or n.get('displayName') or node_id or 'Unknown'
+                        nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': 0, 'failed': 0, 'in_progress': 0})
+            except Exception as e:
+                logger.debug(f"Could not fetch pipeline nodes: {e}")
+            # 2) Get pipeline statistics
+            stats_response = requests.get(
+                f"{base_url}/pipelines/{pipeline_id}/statistics",
+                headers=headers,
+                timeout=15
+            )
+            if stats_response.status_code != 200:
+                err = stats_response.text[:200] if stats_response.text else f'HTTP {stats_response.status_code}'
+                self._send_json({'error': err, 'success': 0, 'failed': 0, 'in_progress': 0, 'nodes': nodes_list, 'duration_seconds': None, 'pipeline_id': pipeline_id})
+                return
+            pipeline_stats = stats_response.json()
+            execution_counters = pipeline_stats.get('pipelineExecutionCounters', [])
+            success_count = 0
+            failed_count = 0
+            in_progress_count = 0
+            for counter in execution_counters:
+                status = (counter.get('status') or '').lower()
+                count = int(counter.get('count', 0))
+                if status == 'success':
+                    success_count = count
+                elif status == 'failed':
+                    failed_count = count
+                elif status in ('in-progress', 'inprogress', 'running', 'pending'):
+                    in_progress_count = count
+                # aborted/terminated are not lumped into failed; display shows only success, failed, in progress
+            # Per-node counters: API uses nodeExecutionsCounters (with 's') and statusCount per node (see dtlpy PipelineStats/NodeCounters)
+            node_counters = (
+                pipeline_stats.get('nodeExecutionsCounters')
+                or pipeline_stats.get('nodeExecutionCounters')
+                or pipeline_stats.get('nodeCounters')
+                or pipeline_stats.get('nodes')
+                or []
+            )
+            if isinstance(node_counters, list) and node_counters:
+                for nc in node_counters:
+                    node_id = nc.get('nodeId') or nc.get('node_id') or nc.get('id') or ''
+                    node_name = nc.get('nodeName') or nc.get('node_name') or nc.get('name') or node_id
+                    ns, nf, np = 0, 0, 0
+                    # SDK uses statusCount (list of {status, count}); also support counters/executionCounters
+                    raw_counts = nc.get('statusCount') or nc.get('counters') or nc.get('executionCounters') or [nc]
+                    for c in raw_counts:
+                        st = (c.get('status') or '').lower()
+                        cnt = int(c.get('count', 0))
+                        if st == 'success':
+                            ns = cnt
+                        elif st == 'failed':
+                            nf = cnt
+                        elif st in ('in-progress', 'inprogress', 'running', 'pending'):
+                            np += cnt
+                        # aborted/terminated are not shown in Failed; only status "failed" is shown
+                    # Match by node_id or by node_name (API may use different id format than GET /pipelines)
+                    existing = next(
+                        (n for n in nodes_list if (n.get('node_id') == node_id or (node_name and n.get('node_name') == node_name))),
+                        None
+                    )
+                    if existing:
+                        existing['success'] = ns
+                        existing['failed'] = nf
+                        existing['in_progress'] = np
+                    else:
+                        nodes_list.append({'node_id': node_id, 'node_name': node_name, 'success': ns, 'failed': nf, 'in_progress': np})
+            completed = success_count + failed_count
+            total = completed + in_progress_count
+            # If API didn't return per-node counters, fill each node with pipeline-level totals so the UI can show counters; set per_node_available=False so the UI can label it as pipeline total.
+            per_node_available = any((n.get('success') or n.get('failed') or n.get('in_progress')) for n in nodes_list)
+            if nodes_list and not per_node_available:
+                for n in nodes_list:
+                    n['success'] = success_count
+                    n['failed'] = failed_count
+                    n['in_progress'] = in_progress_count
+            # 3) Duration: first execution to last (use raw API so we get JSON dates reliably)
+            duration_seconds = None
+            def _parse_ts(v):
+                if v is None:
+                    return None
+                if hasattr(v, 'timestamp'):
+                    return v.timestamp()
+                if isinstance(v, (int, float)):
+                    return float(v)
+                if isinstance(v, str):
+                    try:
+                        import datetime
+                        s = v.replace('Z', '+00:00').replace(' ', 'T')
+                        dt = datetime.datetime.fromisoformat(s)
+                        return dt.timestamp()
+                    except Exception:
+                        pass
+                return None
+            def _get_ts(obj, *keys):
+                for k in keys:
+                    v = getattr(obj, k, None) if hasattr(obj, k) else (obj.get(k) if isinstance(obj, dict) else None)
+                    t = _parse_ts(v)
+                    if t is not None:
+                        return t
+                return None
+            project_id = os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+            if not project_id and pipe_response and pipe_response.status_code == 200:
+                project_id = pipe_data.get('projectId') or pipe_data.get('project_id')
+            if project_id:
+                t0_raw, t1_raw = None, None
+                # Pipeline runs are listed via POST /pipelines/query (pipeline executions), not project executions
+                try:
+                    query_url = f"{base_url}/pipelines/query"
+                    body_first = {
+                        "resource": "pipelineState",
+                        "filter": {"$and": [{"pipelineId": pipeline_id}]},
+                        "sort": {"createdAt": "ascending"},
+                        "page": 0,
+                        "pageSize": 1,
+                    }
+                    r_first = requests.post(query_url, headers=headers, json=body_first, timeout=15)
+                    if r_first.status_code == 200:
+                        data = r_first.json()
+                        items = data.get("items") or data.get("data", {}).get("items") or []
+                        if items and isinstance(items[0], dict):
+                            t0_raw = _get_ts(items[0], "createdAt", "created_at")
+                    body_last = {
+                        "resource": "pipelineState",
+                        "filter": {"$and": [{"pipelineId": pipeline_id}]},
+                        "sort": {"createdAt": "descending"},
+                        "page": 0,
+                        "pageSize": 1,
+                    }
+                    r_last = requests.post(query_url, headers=headers, json=body_last, timeout=15)
+                    if r_last.status_code == 200:
+                        data = r_last.json()
+                        items = data.get("items") or data.get("data", {}).get("items") or []
+                        if items and isinstance(items[0], dict):
+                            t1_raw = _get_ts(items[0], "updatedAt", "updated_at", "createdAt", "created_at")
+                    if t0_raw is not None and t1_raw is not None:
+                        duration_seconds = max(0, int(t1_raw - t0_raw))
+                        logger.info(f"Pipeline {pipeline_id} duration: {duration_seconds}s (from pipelines/query)")
+                except Exception as e:
+                    logger.debug(f"Duration from pipelines/query: {e}")
+                if duration_seconds is None:
+                    try:
+                        project = dl.projects.get(project_id=project_id)
+                        pipeline = project.pipelines.get(pipeline_id=pipeline_id)
+                        filters_asc = dl.Filters(resource=dl.FiltersResource.PIPELINE_EXECUTION)
+                        filters_asc.add(field="pipelineId", values=pipeline_id)
+                        filters_asc.sort_by(field="createdAt", value=dl.FiltersOrderByDirection.ASCENDING)
+                        first_page = pipeline.pipeline_executions.list(filters=filters_asc, page_size=1)
+                        filters_desc = dl.Filters(resource=dl.FiltersResource.PIPELINE_EXECUTION)
+                        filters_desc.add(field="pipelineId", values=pipeline_id)
+                        filters_desc.sort_by(field="createdAt", value=dl.FiltersOrderByDirection.DESCENDING)
+                        last_page = pipeline.pipeline_executions.list(filters=filters_desc, page_size=1)
+                        first_exec = first_page.items[0] if first_page.items else None
+                        last_exec = last_page.items[0] if last_page.items else None
+                        if first_exec and last_exec:
+                            first_json = first_exec.to_json() if hasattr(first_exec, "to_json") else (getattr(first_exec, "_json", None) or first_exec)
+                            last_json = last_exec.to_json() if hasattr(last_exec, "to_json") else (getattr(last_exec, "_json", None) or last_exec)
+                            t0 = _get_ts(first_json or first_exec, "createdAt", "created_at")
+                            t1 = _get_ts(last_json or last_exec, "updatedAt", "updated_at", "createdAt", "created_at")
+                            if t0 is not None and t1 is not None:
+                                duration_seconds = max(0, int(t1 - t0))
+                                logger.info(f"Pipeline {pipeline_id} duration: {duration_seconds}s (from SDK pipeline_executions)")
+                    except Exception as e:
+                        logger.debug(f"Duration from SDK pipeline_executions: {e}")
+            self._send_json({
+                'pipeline_id': pipeline_id,
+                'success': success_count,
+                'failed': failed_count,
+                'in_progress': in_progress_count,
+                'completed': completed,
+                'total': total if total > 0 else (success_count + failed_count + in_progress_count),
+                'duration_seconds': duration_seconds,
+                'nodes': nodes_list,
+                'per_node_available': per_node_available,
+                'error': None
+            })
+        except Exception as e:
+            logger.error(f"Pipeline execution stats error: {e}", exc_info=True)
+            self._send_json({
+                'error': str(e),
+                'success': 0,
+                'failed': 0,
+                'in_progress': 0,
+                'completed': 0,
+                'total': 0,
+                'duration_seconds': None,
+                'nodes': [],
+                'pipeline_id': None
+            })
+
+    def _serve_metrics(self):
+        """Serve GET /metrics with minimal Prometheus exposition format. Always return 200 so platform does not restart the pod."""
+        try:
+            body = "# HELP stress_test_server_up Server is up (1 = up).\n# TYPE stress_test_server_up gauge\nstress_test_server_up 1\n"
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain; charset=utf-8')
+            self.send_header('Content-Length', str(len(body.encode('utf-8'))))
+            self.end_headers()
+            self.wfile.write(body.encode('utf-8'))
+        except Exception as e:
+            logger.debug(f"Metrics endpoint error: {e}")
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/plain; charset=utf-8')
+                self.end_headers()
+                self.wfile.write(b"stress_test_server_up 1\n")
+            except Exception:
+                pass
+
     def _create_faas_proxy_driver(self, data):
         """Create a faasProxy storage driver"""
         try:
@@ -820,7 +1156,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             logger.info(f"Running full stress test workflow (project_id: {project_id})")
             
             # Parse parameters - support both camelCase (from HTML) and snake_case (from API)
-            max_images = data.get('maxImages') or data.get('max_images', 50000)
+            max_images = int(data.get('maxImages') or data.get('max_images') or 50000)
             dataset_id_param = data.get('datasetId') or data.get('dataset_id')
             project_id_param = project_id
             dataset_name = data.get('datasetName') or data.get('dataset_name')
@@ -1633,6 +1969,8 @@ class StressTestServer(dl.BaseServiceRunner):
         logger.info("  POST /api/execute             - Execute service function")
         logger.info("  POST /api/run-full            - Run full workflow (returns workflow_id)")
         logger.info("  GET  /api/workflow-progress/<workflow_id> - Get workflow progress (real-time)")
+        logger.info("  GET  /api/nginx-rps - Nginx RPS metrics from Prometheus (2xx, 4xx, 5xx)")
+        logger.info("  GET  /api/pipeline-execution-stats?pipeline_id= - Pipeline execution counts (success, failed, in progress)")
         logger.info("  GET  /api/logs/<execution_id> - Get execution logs")
         logger.info("  GET  /api/execution/<execution_id> - Get execution status")
         
@@ -2453,6 +2791,11 @@ class StressTestServer(dl.BaseServiceRunner):
                     pass
             logger.info(f"Fetching COCO image list (dataset={dataset}, max={max_images})...")
             all_urls = get_coco_images(dataset=dataset, progress_callback=progress_callback)
+            requested = int(max_images)
+            available = len(all_urls)
+            if available < requested:
+                logger.warning(f"Requested {requested} images but only {available} COCO URLs available - will use {available}")
+            max_images = min(requested, available)
             image_urls = all_urls[:max_images]
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
@@ -3198,56 +3541,58 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.error(f"Failed to list models: {e}")
             return {'error': f'Failed to list models: {str(e)}'}
         
-        # Step 3: Check if pipeline already exists - delete it to recreate fresh
+        # Step 3: Use existing pipeline if present (reuse to avoid delete-triggered restarts); otherwise create new
         logger.info(f"Step 3: Checking for existing pipeline...")
+        pipeline = None
         try:
             existing = project.pipelines.get(pipeline_name=pipeline_name)
-            logger.info(f"Found existing pipeline: {existing.id}. Deleting to recreate...")
-            existing.delete()
-            logger.info("Deleted existing pipeline")
+            logger.info(f"Found existing pipeline: {existing.id}. Reusing it (will update nodes and reinstall).")
+            pipeline = existing
         except dl.exceptions.NotFound:
             logger.info("No existing pipeline found")
-        
-        # Step 4: Create new pipeline with 2 nodes: code node (stream-image) -> ResNet
-        logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
-        
-        # Check if stream-image package/DPK already exists and rename it if needed
-        try:
-            existing_package = project.packages.get(package_name='stream-image')
-            if existing_package:
-                logger.info(f"Found existing stream-image package: {existing_package.id}")
-                # Generate unique package name
-                import time as time_module
-                unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
-                new_package_name = f"stream-image-{unique_suffix}"
-                logger.info(f"Renaming existing package from 'stream-image' to '{new_package_name}' to avoid conflict")
-                
-                # Rename the package
-                try:
-                    existing_package.name = new_package_name
-                    existing_package.update()
-                    logger.info(f"Successfully renamed package to: {new_package_name}")
-                except Exception as rename_error:
-                    logger.warning(f"Could not rename package: {rename_error}")
-                    # Try to delete it instead
-                    try:
-                        logger.info(f"Trying to delete existing package instead...")
-                        existing_package.delete()
-                        logger.info(f"Successfully deleted existing package")
-                    except Exception as delete_error:
-                        logger.warning(f"Could not delete package either: {delete_error}")
-        except dl.exceptions.NotFound:
-            logger.info("No existing stream-image package found - will create new one")
         except Exception as e:
-            logger.warning(f"Could not check for existing stream-image package: {e}")
+            logger.warning(f"Could not get pipeline by name: {e}")
         
-        # Ensure stream-image package doesn't exist (will be created by pipeline from config)
-        # The pipeline will create the package from the code node config, but it fails if a package with that name already exists
-        logger.info("Ensuring stream-image package name is available for pipeline creation...")
-        
-        # Create pipeline
-        pipeline = project.pipelines.create(name=pipeline_name)
-        logger.info(f"Created pipeline: {pipeline.id}")
+        if pipeline is None:
+            # Step 4: Create new pipeline (no existing one)
+            logger.info(f"Step 4: Creating new pipeline with 2 nodes...")
+            # Check if stream-image package/DPK already exists and rename it if needed
+            try:
+                existing_package = project.packages.get(package_name='stream-image')
+                if existing_package:
+                    logger.info(f"Found existing stream-image package: {existing_package.id}")
+                    # Generate unique package name
+                    import time as time_module
+                    unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
+                    new_package_name = f"stream-image-{unique_suffix}"
+                    logger.info(f"Renaming existing package from 'stream-image' to '{new_package_name}' to avoid conflict")
+                    
+                    # Rename the package
+                    try:
+                        existing_package.name = new_package_name
+                        existing_package.update()
+                        logger.info(f"Successfully renamed package to: {new_package_name}")
+                    except Exception as rename_error:
+                        logger.warning(f"Could not rename package: {rename_error}")
+                        # Try to delete it instead
+                        try:
+                            logger.info(f"Trying to delete existing package instead...")
+                            existing_package.delete()
+                            logger.info(f"Successfully deleted existing package")
+                        except Exception as delete_error:
+                            logger.warning(f"Could not delete package either: {delete_error}")
+            except dl.exceptions.NotFound:
+                logger.info("No existing stream-image package found - will create new one")
+            except Exception as e:
+                logger.warning(f"Could not check for existing stream-image package: {e}")
+            
+            # Ensure stream-image package doesn't exist (will be created by pipeline from config)
+            logger.info("Ensuring stream-image package name is available for pipeline creation...")
+            
+            pipeline = project.pipelines.create(name=pipeline_name)
+            logger.info(f"Created pipeline: {pipeline.id}")
+        else:
+            logger.info(f"Step 4: Reusing existing pipeline {pipeline.id}, will update nodes and install.")
         
         # Add 2 nodes connected: stream-image (code) -> resnet (ml)
         try:
@@ -3264,6 +3609,8 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info("Creating code node configuration...")
             code_node = {
                 "id": code_node_id,
+                "name": "stream-image",
+                "displayName": "Stream Image",
                 "inputs": [
                     {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
                 ],
@@ -3282,12 +3629,11 @@ class StressTestServer(dl.BaseServiceRunner):
                             }
                         }
                     },
-                    "position": {"x": 10070, "y": 10206, "z": 0},
+                    "position": {"x": 100, "y": 200, "z": 0},
                     "componentGroupName": "automation",
                     "codeApplicationName": "stream-image",
                     "repeatable": True
                 },
-                "name": "stream-image",
                 "type": "code",
                 "namespace": {
                     "functionName": "stream_image",
@@ -3327,9 +3673,11 @@ class ServiceRunner:
                 }
             }
             
-            # ResNet model node
+            # ResNet model node (distinct name/displayName and position so graph shows two different nodes)
             resnet_node = {
                 "id": resnet_node_id,
+                "name": "resnet",
+                "displayName": f"ResNet ({model.name})",
                 "inputs": [
                     {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
                 ],
@@ -3338,13 +3686,12 @@ class ServiceRunner:
                     {"portId": "annotations", "type": "Annotation[]", "name": "annotations", "displayName": "annotations", "io": "output"}
                 ],
                 "metadata": {
-                    "position": {"x": 10405, "y": 10209, "z": 0},
+                    "position": {"x": 500, "y": 200, "z": 0},
                     "modelName": model.name,
                     "modelId": model.id,
                     "componentGroupName": "models",
                     "repeatable": True
                 },
-                "name": model.name,
                 "type": "ml",
                 "namespace": {
                     "functionName": "predict",
@@ -3408,104 +3755,63 @@ class ServiceRunner:
                 'app_id': app.id if app else None
             }
         
-        # Install the pipeline (with retry for package conflicts)
+        # Install the pipeline (with retry for package conflicts). Skip install when already Installed to avoid platform restart.
         logger.info(f"Step 4f: Installing pipeline (this may take a few minutes)...")
         max_install_retries = 3
         install_success = False
         for retry in range(max_install_retries):
+            # When reusing existing pipeline, skip install if already Installed to avoid service restart
+            try:
+                pipeline = project.pipelines.get(pipeline_id=pipeline.id)
+                if getattr(pipeline, 'status', None) == 'Installed':
+                    logger.info(f"Step 4f: Pipeline already Installed, skipping install to avoid restart.")
+                    install_success = True
+                    break
+            except Exception:
+                pass
             install_exception = None
             try:
                 logger.info(f"Installing pipeline (attempt {retry + 1}/{max_install_retries})...")
                 pipeline.install()
                 logger.info("Pipeline install() call completed, refreshing pipeline status...")
-                # Refresh pipeline to get latest status
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 logger.info(f"Pipeline status after install: {pipeline.status}")
-                
-                # Check if installation succeeded
                 if pipeline.status in ['Installed']:
                     logger.info("Pipeline installed successfully")
                     install_success = True
                     break
                 else:
                     logger.warning(f"Pipeline status after install: {pipeline.status}")
-                    
             except Exception as e:
                 install_exception = e
                 error_str = str(e)
                 logger.warning(f"Pipeline install raised exception: {error_str}")
-            
-            # Check if installation failed (either via exception or status)
             should_check_error = False
             error_message = None
-            
             if install_exception:
                 error_str = str(install_exception)
                 error_message = error_str
                 should_check_error = True
                 logger.info(f"Checking exception message for package conflict: {error_str[:200]}")
-                # Also check if error is in tuple format (common in Dataloop SDK)
                 if isinstance(install_exception, tuple) and len(install_exception) >= 2:
                     error_message = str(install_exception[1]) if install_exception[1] else error_str
                     logger.info(f"Extracted error from tuple: {error_message[:200]}")
-            
-            # Also check pipeline status if no exception or status is Failure
             try:
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 if pipeline.status == "Failure":
                     should_check_error = True
                     logger.warning(f"Pipeline installation failed with status: {pipeline.status}")
-                    # Try to fetch composition to get error details
                     try:
-                        # Try to get composition_id from pipeline
-                        composition_id = None
-                        if hasattr(pipeline, 'composition_id'):
-                            composition_id = pipeline.composition_id
-                        elif hasattr(pipeline, 'composition') and hasattr(pipeline.composition, 'id'):
-                            composition_id = pipeline.composition.id
-                        elif hasattr(pipeline, 'composition') and isinstance(pipeline.composition, dict):
-                            composition_id = pipeline.composition.get('id')
-                        
+                        composition_id = getattr(pipeline, 'composition_id', None) or (pipeline.composition.get('id') if isinstance(getattr(pipeline, 'composition', None), dict) else None)
                         if composition_id:
-                            logger.info(f"Fetching composition {composition_id}...")
                             composition = project.compositions.get(composition_id=composition_id)
                             error_text = composition.get('errorText') if isinstance(composition, dict) else getattr(composition, 'errorText', None)
                             if error_text:
-                                if isinstance(error_text, dict):
-                                    error_message = error_text.get('message', '')
-                                else:
-                                    error_message = str(error_text)
-                                if error_message:
-                                    logger.info(f"Found error in composition.errorText: {error_message}")
-                            else:
-                                logger.info(f"No error in composition.errorText")
-                                # Also try to access as dict
-                                if isinstance(composition, dict):
-                                    error_message = composition.get('errorText', {}).get('message', '') or composition.get('error', {}).get('message', '')
-                                    if error_message:
-                                        logger.info(f"Found error in composition dict: {error_message}")
-                        else:
-                            logger.warning("Could not find composition_id from pipeline")
-                            # Fallback: try direct access
-                            if hasattr(pipeline, 'composition'):
-                                composition = pipeline.composition
-                                if isinstance(composition, dict):
-                                    error_text = composition.get('errorText', {})
-                                    if isinstance(error_text, dict):
-                                        error_message = error_text.get('message', '')
-                                    else:
-                                        error_message = str(error_text) if error_text else None
-                                    if error_message:
-                                        logger.info(f"Found error in pipeline.composition: {error_message}")
+                                error_message = error_text.get('message', '') if isinstance(error_text, dict) else str(error_text)
                     except Exception as comp_error:
                         logger.warning(f"Could not fetch composition: {comp_error}")
-                        import traceback
-                        logger.debug(traceback.format_exc())
             except Exception as refresh_error:
                 logger.warning(f"Could not refresh pipeline: {refresh_error}")
-            
-            # Check if error is about stream-image package already existing
-            # Check for various forms of the error message
             package_conflict_detected = False
             if should_check_error and error_message:
                 error_lower = error_message.lower()
@@ -3515,17 +3821,12 @@ class ServiceRunner:
                     ('stream-image' in error_lower and 'already exist' in error_lower)):
                     package_conflict_detected = True
                     logger.info(f"Package conflict detected in error message: {error_message[:200]}")
-            
             if package_conflict_detected:
                 logger.warning("Package name conflict detected - updating code node to use unique package name")
-                
-                # Generate unique package name
                 import time as time_module
                 unique_suffix = time_module.strftime('%Y%m%d%H%M%S')
                 new_package_name = f"stream-image-{unique_suffix}"
                 logger.info(f"Updating package name from 'stream-image' to '{new_package_name}'")
-                
-                # Get current pipeline nodes
                 try:
                     pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                     current_nodes = pipeline.nodes
@@ -4813,17 +5114,19 @@ class ServiceRunner:
                 return results
             filenames = download_result.get('files', [])
             # Limit filenames to max_images (download_images returns all files in storage, not just downloaded ones)
-            if len(filenames) > max_images:
-                logger.info(f"Limiting filenames to {max_images} from {len(filenames)} files in storage")
-                filenames = filenames[:max_images]
+            if len(filenames) < max_images:
+                logger.warning(f"Shortfall: requested {max_images} images but only {len(filenames)} files in storage (missing {max_images - len(filenames)}). Check download/link step for failures.")
+            filenames = sorted(filenames)[:max_images]
+            if len(filenames) < max_images:
+                logger.info(f"Using {len(filenames)} files (requested {max_images})")
             if progress_callback:
                 progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
         else:
             # Get existing files (use same path as download would use when link_base_url is set)
             if os.path.exists(effective_storage_path):
-                all_filenames = [f for f in os.listdir(effective_storage_path) 
-                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                # Limit to max_images if we have more than needed
+                all_filenames = sorted([f for f in os.listdir(effective_storage_path) 
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                # Limit to max_images if we have more than needed (sorted for deterministic set)
                 filenames = all_filenames[:max_images] if len(all_filenames) > max_images else all_filenames
                 if len(all_filenames) > max_images:
                     logger.info(f"Limiting to {max_images} files from {len(all_filenames)} available in storage")
@@ -4898,25 +5201,30 @@ class ServiceRunner:
             logger.info("STEP 3: Creating pipeline")
             logger.info("=" * 60)
             
-            pipeline_result = self.create_pipeline(
-                pipeline_name=pipeline_name, 
-                project_id=project_id,
-                pipeline_concurrency=pipeline_concurrency,
-                pipeline_max_replicas=pipeline_max_replicas,
-                stream_image_concurrency=_stream_image_concurrency,
-                stream_image_max_replicas=_stream_image_max_replicas,
-                resnet_concurrency=_resnet_concurrency,
-                resnet_max_replicas=_resnet_max_replicas
-            )
+            try:
+                pipeline_result = self.create_pipeline(
+                    pipeline_name=pipeline_name,
+                    project_id=project_id,
+                    pipeline_concurrency=pipeline_concurrency,
+                    pipeline_max_replicas=pipeline_max_replicas,
+                    stream_image_concurrency=_stream_image_concurrency,
+                    stream_image_max_replicas=_stream_image_max_replicas,
+                    resnet_concurrency=_resnet_concurrency,
+                    resnet_max_replicas=_resnet_max_replicas
+                )
+            except Exception as create_err:
+                logger.error(f"create_pipeline raised: {create_err}", exc_info=True)
+                pipeline_result = {'error': str(create_err), 'pipeline_id': None}
             logger.info(f"create_pipeline returned: {pipeline_result}")
             results['steps'].append({
                 'step': 'create_pipeline',
                 'result': pipeline_result
             })
-            pipeline_id = pipeline_result.get('pipeline_id')
+            # Always use pipeline_id when present so batch execution can run even if install had issues
+            pipeline_id = pipeline_result.get('pipeline_id') if isinstance(pipeline_result, dict) else None
             logger.info(f"Extracted pipeline_id: {pipeline_id}")
             if progress_callback:
-                if 'error' in pipeline_result:
+                if pipeline_result and pipeline_result.get('error'):
                     error_msg = pipeline_result.get('error', 'Unknown error')
                     logger.error(f"Pipeline creation failed: {error_msg}")
                     progress_callback('create_pipeline', 'failed', 65, f"Failed: {error_msg}", error=error_msg)
