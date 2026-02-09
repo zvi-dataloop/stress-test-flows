@@ -1104,7 +1104,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             logger.info(f"Running full stress test workflow (project_id: {project_id})")
             
             # Parse parameters - support both camelCase (from HTML) and snake_case (from API)
-            max_images = data.get('maxImages') or data.get('max_images', 50000)
+            max_images = int(data.get('maxImages') or data.get('max_images') or 50000)
             dataset_id_param = data.get('datasetId') or data.get('dataset_id')
             project_id_param = project_id
             dataset_name = data.get('datasetName') or data.get('dataset_name')
@@ -2739,6 +2739,11 @@ class StressTestServer(dl.BaseServiceRunner):
                     pass
             logger.info(f"Fetching COCO image list (dataset={dataset}, max={max_images})...")
             all_urls = get_coco_images(dataset=dataset, progress_callback=progress_callback)
+            requested = int(max_images)
+            available = len(all_urls)
+            if available < requested:
+                logger.warning(f"Requested {requested} images but only {available} COCO URLs available - will use {available}")
+            max_images = min(requested, available)
             image_urls = all_urls[:max_images]
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
@@ -5099,17 +5104,19 @@ class ServiceRunner:
                 return results
             filenames = download_result.get('files', [])
             # Limit filenames to max_images (download_images returns all files in storage, not just downloaded ones)
-            if len(filenames) > max_images:
-                logger.info(f"Limiting filenames to {max_images} from {len(filenames)} files in storage")
-                filenames = filenames[:max_images]
+            if len(filenames) < max_images:
+                logger.warning(f"Shortfall: requested {max_images} images but only {len(filenames)} files in storage (missing {max_images - len(filenames)}). Check download/link step for failures.")
+            filenames = sorted(filenames)[:max_images]
+            if len(filenames) < max_images:
+                logger.info(f"Using {len(filenames)} files (requested {max_images})")
             if progress_callback:
                 progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
         else:
             # Get existing files (use same path as download would use when link_base_url is set)
             if os.path.exists(effective_storage_path):
-                all_filenames = [f for f in os.listdir(effective_storage_path) 
-                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-                # Limit to max_images if we have more than needed
+                all_filenames = sorted([f for f in os.listdir(effective_storage_path) 
+                            if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
+                # Limit to max_images if we have more than needed (sorted for deterministic set)
                 filenames = all_filenames[:max_images] if len(all_filenames) > max_images else all_filenames
                 if len(all_filenames) > max_images:
                     logger.info(f"Limiting to {max_images} files from {len(all_filenames)} available in storage")
