@@ -1,7 +1,7 @@
 {
   "name": "nginx-stress-test",
   "displayName": "Nginx Stress-Test Benchmark",
-  "version": "1.0.70",
+  "version": "1.0.71",
   "scope": "public",
   "attributes": {
     "Provider": "Other",
@@ -10,7 +10,7 @@
   "codebase": {
     "type": "git",
     "gitUrl": "https://github.com/zvi-dataloop/stress-test-flows.git",
-    "gitTag": "1.0.70"
+    "gitTag": "1.0.71"
   },
   "description": "Stress test benchmark app with API to create datasets, pipelines, and execute batch tests",
   "components": {
@@ -64,12 +64,17 @@
           "podType": "regular-m",
           "concurrency": 1,
           "autoscaler": {
+            "queueLength": 100,
+            "cooldownPeriod": 300,
+            "pollingInterval": 15,
             "type": "rabbitmq",
             "minReplicas": 1,
             "maxReplicas": 1
           }
         },
-        "panelNames": ["stress-test-panel"],
+        "panelNames": [
+          "stress-test-panel"
+        ],
         "initParams": {}
       }
     ],
