@@ -304,7 +304,7 @@ python create_faas_proxy_driver.py</p>
                                     <div class="list-item-id">ID: ${driver.id} | Bucket: ${driver.bucket || 'N/A'}</div>
                                 </div>
                                 <div class="list-item-actions">
-                                    <button class="btn btn-small btn-secondary" onclick="copyDriverId('${driver.id}')">Copy ID</button>
+                                    <button class="btn btn-small btn-secondary" data-driver-id="${(driver.id + '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" onclick="copyDriverId(this.getAttribute('data-driver-id'))">Copy ID</button>
                                 </div>
                             </div>
                         `;
@@ -348,8 +348,29 @@ python create_faas_proxy_driver.py</p>
         }
 
         function copyDriverId(driverId) {
-            navigator.clipboard.writeText(driverId).then(() => {
+            if (!driverId) return;
+            const copy = () => {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    return navigator.clipboard.writeText(driverId).then(() => true);
+                }
+                const ta = document.createElement('textarea');
+                ta.value = driverId;
+                ta.setAttribute('readonly', '');
+                ta.style.position = 'absolute';
+                ta.style.left = '-9999px';
+                document.body.appendChild(ta);
+                ta.select();
+                try {
+                    document.execCommand('copy');
+                    return Promise.resolve(true);
+                } finally {
+                    document.body.removeChild(ta);
+                }
+            };
+            copy().then(() => {
                 alert(`Driver ID copied to clipboard: ${driverId}`);
+            }).catch(() => {
+                alert('Could not copy to clipboard. Driver ID: ' + driverId);
             });
         }
 
@@ -417,7 +438,7 @@ python create_faas_proxy_driver.py</p>
                             <p><strong>Driver Name:</strong> ${data.driver.name}</p>
                             <p><strong>Bucket:</strong> ${data.driver.bucket}</p>
                             <p style="margin-top: 12px;">Use this Driver ID when creating datasets in the workflow.</p>
-                            <button class="btn btn-small btn-primary" onclick="copyDriverId('${data.driver.id}')" style="margin-top: 8px;">Copy Driver ID</button>
+                            <button class="btn btn-small btn-primary" data-driver-id="${(data.driver.id + '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" onclick="copyDriverId(this.getAttribute('data-driver-id'))" style="margin-top: 8px;">Copy Driver ID</button>
                         </div>
                     `;
                     
