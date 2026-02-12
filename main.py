@@ -3196,7 +3196,8 @@ class StressTestServer(dl.BaseServiceRunner):
     def create_pipeline(self, project_id: str = None, pipeline_name: str = None, dpk_name: str = None,
                        pipeline_concurrency: int = 30, pipeline_max_replicas: int = 12,
                        stream_image_concurrency: int = None, stream_image_max_replicas: int = None,
-                       resnet_concurrency: int = None, resnet_max_replicas: int = None) -> dict:
+                       resnet_concurrency: int = None, resnet_max_replicas: int = None,
+                       progress_callback=None) -> dict:
         """
         Create stress test pipeline with ResNet model node.
         Installs the ResNet DPK if not already installed.
@@ -3211,6 +3212,7 @@ class StressTestServer(dl.BaseServiceRunner):
             stream_image_max_replicas: Code node max replicas
             resnet_concurrency: ResNet node concurrency (used in DPK computeConfigs)
             resnet_max_replicas: ResNet node max replicas (used in DPK computeConfigs)
+            progress_callback: Optional (step, status, pct, message) for progress during install
         
         Returns:
             dict with pipeline info
@@ -3785,9 +3787,32 @@ class ServiceRunner:
             except Exception:
                 pass
             install_exception = None
-            try:
-                logger.info(f"Installing pipeline (attempt {retry + 1}/{max_install_retries})...")
-                pipeline.install()
+            install_error_holder = [None]
+            import time as time_module
+
+            def _do_install():
+                try:
+                    pipeline.install()
+                except Exception as e:
+                    install_error_holder[0] = e
+
+            logger.info(f"Installing pipeline (attempt {retry + 1}/{max_install_retries})...")
+            install_thread = Thread(target=_do_install)
+            install_start = time_module.time()
+            install_thread.start()
+            heartbeat_interval = 15
+            while install_thread.is_alive():
+                time_module.sleep(1)
+                elapsed = int(time_module.time() - install_start)
+                if progress_callback and elapsed >= 1:
+                    try:
+                        progress_callback('create_pipeline', 'running', 70, f'Installing pipeline... ({elapsed // 60}m {elapsed % 60}s)')
+                    except Exception:
+                        pass
+            install_thread.join()
+            if install_error_holder[0] is not None:
+                install_exception = install_error_holder[0]
+            else:
                 logger.info("Pipeline install() call completed, refreshing pipeline status...")
                 pipeline = project.pipelines.get(pipeline_id=pipeline.id)
                 logger.info(f"Pipeline status after install: {pipeline.status}")
@@ -3797,9 +3822,8 @@ class ServiceRunner:
                     break
                 else:
                     logger.warning(f"Pipeline status after install: {pipeline.status}")
-            except Exception as e:
-                install_exception = e
-                error_str = str(e)
+            if install_exception is not None:
+                error_str = str(install_exception)
                 logger.warning(f"Pipeline install raised exception: {error_str}")
                 should_check_error = False
                 error_message = None
@@ -5190,7 +5214,8 @@ class ServiceRunner:
                     stream_image_concurrency=_stream_image_concurrency,
                     stream_image_max_replicas=_stream_image_max_replicas,
                     resnet_concurrency=_resnet_concurrency,
-                    resnet_max_replicas=_resnet_max_replicas
+                    resnet_max_replicas=_resnet_max_replicas,
+                    progress_callback=progress_callback
                 )
             except Exception as create_err:
                 logger.error(f"create_pipeline raised: {create_err}", exc_info=True)
