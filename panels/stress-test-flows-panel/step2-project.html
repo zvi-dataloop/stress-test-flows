@@ -70,6 +70,7 @@
         .copy-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); z-index: 10000; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: 500; color: white; background: var(--gradient-1); box-shadow: var(--shadow-md); opacity: 0; transition: transform 0.25s ease, opacity 0.25s ease; pointer-events: none; max-width: 90%; text-align: center; }
         .copy-toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
         .copy-toast.error { background: var(--accent-error); }
+        .copy-toast .toast-id { display: block; margin-top: 8px; font-family: 'JetBrains Mono', monospace; font-size: 12px; word-break: break-all; user-select: all; -webkit-user-select: all; cursor: text; background: rgba(0,0,0,0.2); padding: 6px 10px; border-radius: 6px; pointer-events: auto; }
     </style>
 </head>
 <body>
@@ -359,7 +360,8 @@ python create_faas_proxy_driver.py</p>
                 toast.className = 'copy-toast';
                 document.body.appendChild(toast);
             }
-            toast.textContent = message;
+            toast.innerHTML = '';
+            toast.appendChild(document.createTextNode(message));
             toast.classList.toggle('error', !!isError);
             toast.classList.add('show');
             clearTimeout(showCopyToast._tid);
@@ -368,31 +370,85 @@ python create_faas_proxy_driver.py</p>
             }, 2500);
         }
 
+        function showCopyToastWithId(message, driverId) {
+            let toast = document.getElementById('copyToast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'copyToast';
+                toast.className = 'copy-toast';
+                document.body.appendChild(toast);
+            }
+            const idEl = document.createElement('span');
+            idEl.className = 'toast-id';
+            idEl.textContent = driverId;
+            toast.innerHTML = '';
+            toast.appendChild(document.createTextNode(message));
+            toast.appendChild(idEl);
+            toast.classList.add('error', 'show');
+            toast.style.pointerEvents = 'auto';
+            clearTimeout(showCopyToast._tid);
+            showCopyToast._tid = setTimeout(() => {
+                toast.classList.remove('show');
+                toast.style.pointerEvents = '';
+            }, 5000);
+        }
+
         function copyDriverId(driverId) {
             if (!driverId) return;
+            try { window.focus(); } catch (e) {}
             const copy = () => {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     return navigator.clipboard.writeText(driverId).then(() => true);
                 }
+                return Promise.resolve(false);
+            };
+            const copyFallback = () => {
                 const ta = document.createElement('textarea');
                 ta.value = driverId;
                 ta.setAttribute('readonly', '');
-                ta.style.position = 'absolute';
-                ta.style.left = '-9999px';
+                ta.style.position = 'fixed';
+                ta.style.left = '0';
+                ta.style.top = '0';
+                ta.style.width = '2em';
+                ta.style.height = '2em';
+                ta.style.padding = '0';
+                ta.style.border = 'none';
+                ta.style.outline = 'none';
+                ta.style.boxShadow = 'none';
+                ta.style.background = 'transparent';
+                ta.style.opacity = '0';
+                ta.setAttribute('aria-hidden', 'true');
                 document.body.appendChild(ta);
+                ta.focus();
                 ta.select();
+                ta.setSelectionRange(0, driverId.length);
+                let ok = false;
                 try {
-                    document.execCommand('copy');
-                    return Promise.resolve(true);
+                    ok = document.execCommand('copy');
                 } finally {
                     document.body.removeChild(ta);
                 }
+                return ok;
             };
-            copy().then(() => {
-                showCopyToast('Driver ID copied to clipboard');
-            }).catch(() => {
-                showCopyToast('Could not copy. ID: ' + driverId, true);
-            });
+            copy()
+                .then(done => {
+                    if (done) {
+                        showCopyToast('Driver ID copied to clipboard');
+                        return;
+                    }
+                    if (copyFallback()) {
+                        showCopyToast('Driver ID copied to clipboard');
+                    } else {
+                        showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
+                    }
+                })
+                .catch(() => {
+                    if (copyFallback()) {
+                        showCopyToast('Driver ID copied to clipboard');
+                    } else {
+                        showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
+                    }
+                });
         }
 
         async function createDriver(event) {
