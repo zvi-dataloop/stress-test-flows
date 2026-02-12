@@ -66,6 +66,10 @@
         @keyframes spin { to { transform: rotate(360deg); } }
 
         .nav-buttons { display: flex; justify-content: space-between; margin-top: 40px; padding-top: 24px; border-top: 1px solid var(--border-color); }
+
+        .copy-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px); z-index: 10000; padding: 12px 20px; border-radius: 10px; font-size: 14px; font-weight: 500; color: white; background: var(--gradient-1); box-shadow: var(--shadow-md); opacity: 0; transition: transform 0.25s ease, opacity 0.25s ease; pointer-events: none; max-width: 90%; text-align: center; }
+        .copy-toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+        .copy-toast.error { background: var(--accent-error); }
     </style>
 </head>
 <body>
@@ -347,6 +351,23 @@ python create_faas_proxy_driver.py</p>
             }
         }
 
+        function showCopyToast(message, isError) {
+            let toast = document.getElementById('copyToast');
+            if (!toast) {
+                toast = document.createElement('div');
+                toast.id = 'copyToast';
+                toast.className = 'copy-toast';
+                document.body.appendChild(toast);
+            }
+            toast.textContent = message;
+            toast.classList.toggle('error', !!isError);
+            toast.classList.add('show');
+            clearTimeout(showCopyToast._tid);
+            showCopyToast._tid = setTimeout(() => {
+                toast.classList.remove('show');
+            }, 2500);
+        }
+
         function copyDriverId(driverId) {
             if (!driverId) return;
             const copy = () => {
@@ -368,9 +389,9 @@ python create_faas_proxy_driver.py</p>
                 }
             };
             copy().then(() => {
-                alert(`Driver ID copied to clipboard: ${driverId}`);
+                showCopyToast('Driver ID copied to clipboard');
             }).catch(() => {
-                alert('Could not copy to clipboard. Driver ID: ' + driverId);
+                showCopyToast('Could not copy. ID: ' + driverId, true);
             });
         }
 
