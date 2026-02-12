@@ -3353,6 +3353,9 @@ class StressTestServer(dl.BaseServiceRunner):
                                     compute_config['runtime']['autoscaler'] = {**compute_config['runtime']['autoscaler'], **new_runtime['autoscaler']}
                             else:
                                 compute_config['runtime'] = new_runtime
+                            compute_config['onReset'] = 'rerun'
+                            compute_config['executionTimeout'] = 40
+                            executionTimeout
                             config_name = compute_config.get('name', 'unknown')
                             logger.info(f"Updated computeConfig '{config_name}' with dtlpy version 1.118.15")
                     
@@ -3639,6 +3642,7 @@ class StressTestServer(dl.BaseServiceRunner):
 import io
 import requests
 from PIL import Image
+import time
 
 class ServiceRunner:
 
@@ -3646,11 +3650,25 @@ class ServiceRunner:
         headers = {
             "Authorization": f"Bearer {dl.token()}"
         }
-        response = requests.get(item.stream, headers=headers, timeout=55)
-        response.raise_for_status()
-        
-        image_data = io.BytesIO(response.content)
-        
+        # Streaming with (connect_timeout, read_timeout) + retries for flaky networks
+        last_error = None
+        for attempt in range(3):
+            try:
+                with requests.get(item.stream, headers=headers, stream=True, timeout=(10, 120)) as response:
+                    response.raise_for_status()
+                    image_data = io.BytesIO()
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            image_data.write(chunk)
+                break
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_error = e
+                if attempt < 2:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise last_error
+
+        image_data.seek(0)
         with Image.open(image_data) as img:
             img.verify()
             print(f"Success: Valid {img.format} image downloaded.")
