@@ -7,6 +7,7 @@ Combines UI server and stress test execution in one service.
 import os
 import json
 import logging
+import secrets
 import time
 import threading
 from threading import Thread
@@ -3601,6 +3602,7 @@ class StressTestServer(dl.BaseServiceRunner):
             # Root node receives items from batch execution
             # Package config is always included (existing package was renamed if it existed)
             logger.info("Creating code node configuration...")
+            _stream_service_name = f"stream-image-{secrets.token_hex(4)}"
             code_node = {
                 "id": code_node_id,
                 "name": "stream-image",
@@ -3632,7 +3634,7 @@ class StressTestServer(dl.BaseServiceRunner):
                 "namespace": {
                     "functionName": "stream_image",
                     "projectName": project.name,
-                    "serviceName": "stream-image",
+                    "serviceName": _stream_service_name,
                     "moduleName": "code_module"
                     # Note: packageName is not included - package will be created from config.package
                 },
