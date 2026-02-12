@@ -3640,37 +3640,46 @@ class StressTestServer(dl.BaseServiceRunner):
                         "code": '''import dtlpy as dl
 import io
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util import Retry
 from PIL import Image
-import time
 
 class ServiceRunner:
 
     def stream_image(self, item):
-        headers = {
-            "Authorization": f"Bearer {dl.token()}"
-        }
-        # Streaming with (connect_timeout, read_timeout) + retries for flaky networks
-        last_error = None
-        for attempt in range(3):
-            try:
-                with requests.get(item.stream, headers=headers, stream=True, timeout=(10, 120)) as response:
-                    response.raise_for_status()
-                    image_data = io.BytesIO()
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            image_data.write(chunk)
-                break
-            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
-                last_error = e
-                if attempt < 2:
-                    time.sleep(2 ** attempt)
-                else:
-                    raise last_error
-
+        # Same as dtlpy: Session + Retry + HTTPAdapter, timeout=120, stream + iter_content(8192)
+        # See api_client.send_session and downloader.get_url_stream / __thread_download
+        retry = Retry(
+            total=5,
+            read=5,
+            connect=5,
+            backoff_factor=1,
+            status_forcelist=(500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511),
+            raise_on_status=False,
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session = requests.Session()
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        prepared = requests.Request(
+            method="GET",
+            url=item.stream,
+            headers={
+                "Authorization": "Bearer " + dl.token(),
+                "x-dl-sanitize": "0",
+                "Connection": "keep-alive",
+            },
+        ).prepare()
+        response = session.send(request=prepared, stream=True, timeout=120)
+        response.raise_for_status()
+        image_data = io.BytesIO()
+        for chunk in response.iter_content(chunk_size=8192):
+            if chunk:
+                image_data.write(chunk)
         image_data.seek(0)
         with Image.open(image_data) as img:
             img.verify()
-            print(f"Success: Valid {img.format} image downloaded.")
+            print("Success: Valid {} image downloaded.".format(img.format))
         return item
 ''',
                         "name": "run",
