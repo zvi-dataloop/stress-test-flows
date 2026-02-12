@@ -3615,6 +3615,8 @@ class StressTestServer(dl.BaseServiceRunner):
                 ],
                 "metadata": {
                     "serviceConfig": {
+                        "onReset": "rerun",
+                        "executionTimeout": 40,
                         "runtime": {
                             "concurrency": _stream_concurrency,
                             "autoscaler": {
