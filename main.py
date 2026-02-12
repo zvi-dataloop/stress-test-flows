@@ -3355,7 +3355,6 @@ class StressTestServer(dl.BaseServiceRunner):
                                 compute_config['runtime'] = new_runtime
                             compute_config['onReset'] = 'rerun'
                             compute_config['executionTimeout'] = 40
-                            executionTimeout
                             config_name = compute_config.get('name', 'unknown')
                             logger.info(f"Updated computeConfig '{config_name}' with dtlpy version 1.118.15")
                     
