@@ -161,8 +161,9 @@ DOWNLOAD_MAX_PROCESSES = 32
 def _path_inside_storage_from_link_base_url(link_base_url: str) -> str:
     """
     Extract path-inside-storage from Link Base URL. Link URL = nginx-gateway path + path inside storage.
-    Strips leading 'nginx-gateway/' if present so storage path matches the path inside storage.
+    Strips up to and including 'nginx-gateway/' so storage path matches the path inside storage.
     E.g. https://my-domain.ai/nginx-gateway/root-folder/subfolder -> root-folder/subfolder
+         http://prod.k8s.hpc.ford.com/dataloop/nginx-gateway/s/dprod3/dataloop/stress-test -> s/dprod3/dataloop/stress-test
          http://34.140.193.179/root-folder/subfolder -> root-folder/subfolder
     """
     if not link_base_url:
@@ -171,7 +172,10 @@ def _path_inside_storage_from_link_base_url(link_base_url: str) -> str:
     path = (parsed.path or '').strip('/')
     if not path:
         return ''
-    if path.startswith('nginx-gateway/'):
+    # Support both /nginx-gateway/ as a segment (e.g. .../dataloop/nginx-gateway/s/...) and leading nginx-gateway/
+    if '/nginx-gateway/' in path:
+        path = path.split('/nginx-gateway/', 1)[1].lstrip('/')
+    elif path.startswith('nginx-gateway/'):
         path = path[len('nginx-gateway/'):].lstrip('/')
     return path
 
