@@ -47,7 +47,23 @@ execution_status = {}
 workflow_progress = {}  # workflow_id -> {status, current_step, progress_pct, logs, result, error}
 
 # Prometheus URL for Nginx RPS metrics (same namespace: prometheus:9090)
-PROMETHEUS_URL = os.environ.get('PROMETHEUS_URL', 'http://prometheus:3000').rstrip('/')
+def _resolve_prometheus_url() -> str:
+    url = os.environ.get('PROMETHEUS_URL', '').strip().rstrip('/')
+    if url:
+        return url
+    try:
+        ns_path = '/var/run/secrets/kubernetes.io/serviceaccount/namespace'
+        if os.path.isfile(ns_path):
+            with open(ns_path) as f:
+                namespace = (f.read() or '').strip()
+            if namespace:
+                return f'http://prometheus.{namespace}.svc.cluster.local:3000'
+    except OSError:
+        pass
+    return 'http://prometheus:3000'
+
+
+PROMETHEUS_URL = _resolve_prometheus_url()
 
 # Global reference to the server instance (set by StressTestServer.__init__)
 _stress_test_server_instance = None
@@ -3332,7 +3348,7 @@ class StressTestServer(dl.BaseServiceRunner):
                         for service in dpk_data['components']['services']:
                             if 'versions' not in service:
                                 service['versions'] = {}
-                            service['versions']['dtlpy'] = '1.118.15'
+                            service['versions']['dtlpy'] = os.environ.get('VERSION', '1.118.15')
                             logger.info(f"Updated service {service.get('name', 'unknown')} with dtlpy version 1.118.15")
                     
                     # Modify computeConfigs to have dtlpy version 1.118.15 (especially resnet-deploy)
@@ -3340,7 +3356,7 @@ class StressTestServer(dl.BaseServiceRunner):
                         for compute_config in dpk_data['components']['computeConfigs']:
                             if 'versions' not in compute_config:
                                 compute_config['versions'] = {}
-                            compute_config['versions']['dtlpy'] = '1.118.15'
+                            compute_config['versions']['dtlpy'] = os.environ.get('DTPLY', '1.118.15')
                             
                             # Merge runtime config with existing runtime if it exists (ResNet node uses these)
                             new_runtime = {
@@ -3619,6 +3635,9 @@ class StressTestServer(dl.BaseServiceRunner):
                 ],
                 "metadata": {
                     "serviceConfig": {
+                        "versions": {
+                            "dtlpy": os.environ.get('VERSION', '1.118.15')
+                        },
                         "onReset": "rerun",
                         "executionTimeout": 40,
                         "runtime": {
