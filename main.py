@@ -160,9 +160,9 @@ DOWNLOAD_MAX_PROCESSES = 32
 
 def _path_inside_storage_from_link_base_url(link_base_url: str) -> str:
     """
-    Extract path-inside-storage from Link Base URL. Link URL = serve-agent path + path inside storage.
-    Strips leading 'serve-agent/' if present so storage path matches the path inside storage.
-    E.g. https://my-domain.ai/serve-agent/root-folder/subfolder -> root-folder/subfolder
+    Extract path-inside-storage from Link Base URL. Link URL = nginx-gateway path + path inside storage.
+    Strips leading 'nginx-gateway/' if present so storage path matches the path inside storage.
+    E.g. https://my-domain.ai/nginx-gateway/root-folder/subfolder -> root-folder/subfolder
          http://34.140.193.179/root-folder/subfolder -> root-folder/subfolder
     """
     if not link_base_url:
@@ -171,15 +171,15 @@ def _path_inside_storage_from_link_base_url(link_base_url: str) -> str:
     path = (parsed.path or '').strip('/')
     if not path:
         return ''
-    if path.startswith('serve-agent/'):
-        path = path[len('serve-agent/'):].lstrip('/')
+    if path.startswith('nginx-gateway/'):
+        path = path[len('nginx-gateway/'):].lstrip('/')
     return path
 
 
 def _remote_path_from_link_base_url(link_base_url: str) -> str:
     """
     Derive dataset remote path from Link Base URL (path inside storage; last segment as folder).
-    E.g. .../serve-agent/root-folder/subfolder -> /subfolder; .../root-folder -> /root-folder
+    E.g. .../nginx-gateway/root-folder/subfolder -> /subfolder; .../root-folder -> /root-folder
     Falls back to /stress-test if path cannot be derived.
     """
     path_inside = _path_inside_storage_from_link_base_url(link_base_url)
@@ -193,8 +193,8 @@ def _remote_path_from_link_base_url(link_base_url: str) -> str:
 def _storage_path_from_link_base_url(link_base_url: str):
     """
     Derive filesystem storage path for download from Link Base URL.
-    Link URL = serve-agent path + path inside storage; we use path inside storage (strip serve-agent/).
-    E.g. https://my-domain.ai/serve-agent/root-folder/subfolder -> /root-folder/subfolder
+    Link URL = nginx-gateway path + path inside storage; we use path inside storage (strip nginx-gateway/).
+    E.g. https://my-domain.ai/nginx-gateway/root-folder/subfolder -> /root-folder/subfolder
          http://34.140.193.179/root-folder/subfolder -> /root-folder/subfolder
     Returns None if link_base_url is missing (caller should use default storage_path).
     """
