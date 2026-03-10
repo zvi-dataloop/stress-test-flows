@@ -3667,7 +3667,8 @@ class StressTestServer(dl.BaseServiceRunner):
                 "projectId": project.id,
                 "config": {
                     "package": {
-                        "code": '''import dtlpy as dl
+                        "code": '''import os
+import dtlpy as dl
 import io
 import requests
 from requests.adapters import HTTPAdapter
@@ -3677,8 +3678,13 @@ from PIL import Image
 class ServiceRunner:
 
     def stream_image(self, item):
+        # Use internal gateway when set (e.g. in FaaS where external hostname may not resolve)
+        internal_base = os.environ.get("INTERNAL_REQUESTS_URL", "").strip().rstrip("/")
+        if internal_base:
+            stream_url = internal_base + "/items/" + item.id + "/stream"
+        else:
+            stream_url = item.stream
         # Same as dtlpy: Session + Retry + HTTPAdapter, timeout=120, stream + iter_content(8192)
-        # See api_client.send_session and downloader.get_url_stream / __thread_download
         retry = Retry(
             total=5,
             read=5,
@@ -3693,7 +3699,7 @@ class ServiceRunner:
         session.mount("https://", adapter)
         prepared = requests.Request(
             method="GET",
-            url=item.stream,
+            url=stream_url,
             headers={
                 "Authorization": "Bearer " + dl.token(),
                 "x-dl-sanitize": "0",
