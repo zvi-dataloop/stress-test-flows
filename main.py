@@ -3356,7 +3356,7 @@ class StressTestServer(dl.BaseServiceRunner):
                         for compute_config in dpk_data['components']['computeConfigs']:
                             if 'versions' not in compute_config:
                                 compute_config['versions'] = {}
-                            compute_config['versions']['dtlpy'] = os.environ.get('DTPLY', '1.118.15')
+                            compute_config['versions']['dtlpy'] = os.environ.get('VERSION', '1.118.15')
                             
                             # Merge runtime config with existing runtime if it exists (ResNet node uses these)
                             new_runtime = {
@@ -3628,6 +3628,7 @@ class StressTestServer(dl.BaseServiceRunner):
                 "name": "stream-image",
                 "displayName": "Stream Image",
                 "inputs": [
+                    
                     {"portId": "item", "type": "Item", "name": "item", "displayName": "item", "io": "input"}
                 ],
                 "outputs": [
