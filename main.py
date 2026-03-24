@@ -527,6 +527,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 self._run_full_workflow(data)
             elif parsed.path == '/api/create-faas-proxy-driver':
                 self._create_faas_proxy_driver(data)
+            elif parsed.path == '/api/create-hybrid-driver':
+                self._create_hybrid_driver(data)
             elif parsed.path.startswith('/api/cancel-workflow/'):
                 workflow_id = parsed.path.split('/api/cancel-workflow/')[1].split('/')[0]
                 self._cancel_workflow(workflow_id)
@@ -984,6 +986,39 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
             self._send_json({'success': False, 'error': str(e)})
     
+    def _create_hybrid_driver(self, data):
+        """Create a HYBRID external storage driver (compute storage)."""
+        try:
+            project = self._get_project()
+            driver_name = data.get('driverName') or data.get('driver_name')
+            compute_id = data.get('computeId') or data.get('compute_id')
+            compute_storage_name = data.get('computeStorageName') or data.get('compute_storage_name')
+            org_id = data.get('orgId') or data.get('org_id')
+            path = data.get('path')
+            if isinstance(path, str):
+                path = path.strip()
+            if not path:
+                link_base = data.get('linkBaseUrl') or data.get('link_base_url')
+                if isinstance(link_base, str) and link_base.strip():
+                    path = _storage_path_from_link_base_url(link_base.strip()) or DEFAULT_STORAGE_BASE_PATH
+                else:
+                    path = DEFAULT_STORAGE_BASE_PATH  # e.g. /s/pd_datfs2/stress-test
+            if not driver_name or not compute_id or not compute_storage_name:
+                self._send_error(400, 'driverName, computeId, and computeStorageName are required')
+                return
+            result = _stress_test_server_instance.create_hybrid_storage_driver(
+                project_id=project.id,
+                driver_name=driver_name,
+                compute_id=compute_id,
+                compute_storage_name=compute_storage_name,
+                org_id=org_id,
+                path=path,
+            )
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error creating HYBRID driver: {e}", exc_info=True)
+            self._send_json({'success': False, 'error': str(e)})
+    
     def _get_stress_test_service(self, project_id=None):
         """Get the stress-test-service and its project"""
         try:
@@ -1166,6 +1201,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "skipPipeline": false,  # or "skip_pipeline"
             "skipExecute": false,  # or "skip_execute"
             "linkBaseUrl": "...",  # or "link_base_url" (optional, base URL for link items)
+            "hybridStorage": false,  # or "hybrid_storage" - HYBRID driver: no link items; dataset.sync() indexes files
         }
         
         Note: Service ID and Project ID are automatically detected - no need to provide them.
@@ -1211,7 +1247,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 link_base_url = link_base_url.strip()
             if link_base_url is None or link_base_url == '':
                 link_base_url = DEFAULT_LINK_BASE_URL
-            logger.info(f"Workflow params: dataset_id={dataset_id_param!r}, create_dataset={create_dataset}, link_base_url={link_base_url!r}")
+            _hybrid_raw = data.get('hybridStorage', data.get('hybrid_storage', False))
+            hybrid_storage = _hybrid_raw if isinstance(_hybrid_raw, bool) else str(_hybrid_raw).lower() in ('1', 'true', 'yes', 'on')
+            logger.info(f"Workflow params: dataset_id={dataset_id_param!r}, create_dataset={create_dataset}, link_base_url={link_base_url!r}, hybrid_storage={hybrid_storage}")
             
             # Generate unique workflow ID
             import uuid
@@ -1251,7 +1289,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 stream_image_concurrency,
                 stream_image_max_replicas,
                 resnet_concurrency,
-                resnet_max_replicas
+                resnet_max_replicas,
+                hybrid_storage,
             ), daemon=True).start()
             
             # Return immediately with workflow_id for polling
@@ -1308,7 +1347,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                            dataset_name, driver_id, pipeline_name, num_workers, coco_dataset,
                            create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
                            link_base_url, pipeline_concurrency, pipeline_max_replicas,
-                           stream_image_concurrency, stream_image_max_replicas, resnet_concurrency, resnet_max_replicas):
+                           stream_image_concurrency, stream_image_max_replicas, resnet_concurrency, resnet_max_replicas,
+                           hybrid_storage=False):
         """Run workflow in background thread with progress updates"""
         try:
             def update_progress(step, status, progress_pct, message, result=None, error=None):
@@ -1384,7 +1424,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 skip_link_items=skip_link_items,
                 skip_pipeline=skip_pipeline,
                 skip_execute=skip_execute,
-                progress_callback=update_progress
+                progress_callback=update_progress,
+                hybrid_storage=hybrid_storage,
             )
             
             # Clear workflow_id after completion
@@ -2034,7 +2075,8 @@ class StressTestServer(dl.BaseServiceRunner):
     
     # ========== Stress Test Execution Methods ==========
     
-    def create_dataset(self, project_id: str = None, dataset_name: str = None, driver_id: str = None) -> dict:
+    def create_dataset(self, project_id: str = None, dataset_name: str = None, driver_id: str = None,
+                       sync_after_create: bool = False) -> dict:
         """
         Create a dataset for stress testing if it doesn't exist.
         
@@ -2042,6 +2084,7 @@ class StressTestServer(dl.BaseServiceRunner):
             project_id: Project ID (if None, uses project from default_dataset_id)
             dataset_name: Dataset name (default: 'stress-test-dataset-{date}')
             driver_id: Driver ID for the dataset (mandatory)
+            sync_after_create: If True (HYBRID flow), call dataset.sync() after create/reuse
         
         Returns:
             dict with dataset info
@@ -2093,6 +2136,12 @@ class StressTestServer(dl.BaseServiceRunner):
                 else:
                     # Dataset is empty, can reuse it
                     logger.info(f"Existing dataset is empty - reusing it")
+                    if sync_after_create:
+                        try:
+                            existing_dataset.sync()  # HYBRID: index storage after (re)using dataset
+                            logger.info(f"dataset.sync() completed for existing empty dataset {existing_dataset.id}")
+                        except Exception as sync_err:
+                            logger.warning(f"dataset.sync() after reuse failed: {sync_err}")
                     return {
                         'dataset_id': existing_dataset.id,
                         'dataset_name': existing_dataset.name,
@@ -2139,6 +2188,12 @@ class StressTestServer(dl.BaseServiceRunner):
                 # Get the dataset object from SDK
                 dataset = project.datasets.get(dataset_id=dataset_data['id'])
             logger.info(f"Created dataset: {dataset.id} with driver_id: {driver_id}")
+            if sync_after_create:
+                try:
+                    dataset.sync()  # HYBRID: immediate sync after create (per product pattern)
+                    logger.info(f"dataset.sync() completed after create for {dataset.id}")
+                except Exception as sync_err:
+                    logger.warning(f"dataset.sync() after create failed: {sync_err}")
             return {
                 'dataset_id': dataset.id,
                 'dataset_name': dataset.name,
@@ -2155,6 +2210,17 @@ class StressTestServer(dl.BaseServiceRunner):
                 'dataset_name': dataset_name,
                 'driver_id': driver_id
             }
+    
+    def _sync_dataset_after_hybrid_storage(self, dataset_id: str) -> None:
+        """HYBRID: refresh dataset items from compute/external storage after files are on disk."""
+        if not dataset_id:
+            return
+        try:
+            ds = dl.datasets.get(dataset_id=dataset_id)
+            ds.sync()
+            logger.info(f"HYBRID: dataset.sync() completed for {dataset_id}")
+        except Exception as e:
+            logger.error(f"HYBRID: dataset.sync() failed for {dataset_id}: {e}", exc_info=True)
     
     def check_org_access(self) -> dict:
         """
@@ -2783,6 +2849,53 @@ class StressTestServer(dl.BaseServiceRunner):
                 'error': err_msg,
                 'message': err_msg
             }
+    
+    def create_hybrid_storage_driver(self, project_id: str = None, driver_name: str = None,
+                                     compute_id: str = None, compute_storage_name: str = None,
+                                     org_id: str = None, path: str = None) -> dict:
+        """
+        Create a HYBRID external storage driver (compute storage backed).
+        """
+        try:
+            if project_id is None:
+                project_id = self.project_id
+            project = dl.projects.get(project_id=project_id)
+            if not driver_name or not compute_id or not compute_storage_name:
+                return {'success': False, 'error': 'driver_name, compute_id, and compute_storage_name are required'}
+            if org_id is None:
+                if isinstance(project.org, dict):
+                    org_id = project.org.get('id')
+                else:
+                    org_id = getattr(project.org, 'id', None)
+            if not org_id:
+                return {'success': False, 'error': 'Could not determine organization ID; pass orgId'}
+            if path is None or (isinstance(path, str) and not path.strip()):
+                path = DEFAULT_STORAGE_BASE_PATH  # stress-test folder on compute storage, e.g. /s/.../stress-test
+            elif isinstance(path, str):
+                path = path.strip()
+            # Prefer SDK enum when available (newer dtlpy); else string for API compatibility
+            hybrid_type = getattr(dl.ExternalStorage, 'HYBRID', 'hybrid')
+            driver = project.drivers.create(
+                name=driver_name,
+                driver_type=hybrid_type,
+                compute_id=compute_id,
+                compute_storage_name=compute_storage_name,
+                org_id=org_id,
+                path=path,
+            )
+            return {
+                'success': True,
+                'driver': {
+                    'id': driver.id,
+                    'name': getattr(driver, 'name', None) or driver_name,
+                    'type': 'hybrid',
+                },
+                'exists': False,
+                'message': 'HYBRID driver created successfully',
+            }
+        except Exception as e:
+            logger.error(f"Error creating HYBRID driver: {e}", exc_info=True)
+            return {'success': False, 'error': str(e), 'message': str(e)}
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None,
                         create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None, workflow_id: str = None) -> dict:
@@ -4865,12 +4978,13 @@ class ServiceRunner:
                              skip_pipeline: bool = False,
                              skip_execute: bool = False,
                              link_base_url: str = None,
-                             progress_callback=None) -> dict:
+                             progress_callback=None,
+                             hybrid_storage: bool = False) -> dict:
         """
         Run the full stress test flow:
         0. (Optional) Create dataset if it doesn't exist
         1. Download COCO images to NFS (up to 123k from train+val) - AUTO-SKIPPED if dataset has items
-        2. Create link items in dataset - AUTO-SKIPPED if dataset has items
+        2. Create link items in dataset - AUTO-SKIPPED if dataset has items (HYBRID: always skipped; use dataset.sync)
         3. Create pipeline
         4. Execute pipeline batch
         
@@ -4890,6 +5004,7 @@ class ServiceRunner:
             skip_pipeline: Skip pipeline creation
             skip_execute: Skip pipeline execution
             link_base_url: Base URL for link items (overrides instance default)
+            hybrid_storage: HYBRID driver flow — no per-file link items; sync dataset after create and after download phase
             stream_image_concurrency: Code node (stream-image) concurrency (default: pipeline_concurrency)
             stream_image_max_replicas: Code node max replicas (default: pipeline_max_replicas)
             resnet_concurrency: ResNet node concurrency (default: pipeline_concurrency)
@@ -4912,7 +5027,8 @@ class ServiceRunner:
             'date': self.date_str,
             'storage_path': effective_storage_path,
             'max_images': max_images,
-            'steps': []
+            'steps': [],
+            'hybrid_storage': hybrid_storage,
         }
         
         # Step 0: Handle dataset creation/selection
@@ -5018,9 +5134,10 @@ class ServiceRunner:
                 unique_dataset_name = dataset_name
             
             dataset_result = self.create_dataset(
-                project_id=project_id, 
+                project_id=project_id,
                 dataset_name=unique_dataset_name,
-                driver_id=driver_id
+                driver_id=driver_id,
+                sync_after_create=hybrid_storage,
             )
             results['steps'].append({
                 'step': 'create_dataset',
@@ -5119,8 +5236,8 @@ class ServiceRunner:
                 logger.info(f"        (Target: {max_images} total, Currently: {actual_files_on_disk} in storage)")
                 logger.info("=" * 60)
                 
-                # Download the remaining images (create link items on the fly when we will do link items)
-                do_link_on_download = not (skip_link_items or dataset_has_items)
+                # HYBRID: never create link items during download (items come from dataset.sync)
+                do_link_on_download = False if hybrid_storage else not (skip_link_items or dataset_has_items)
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
@@ -5134,7 +5251,7 @@ class ServiceRunner:
                 logger.info("=" * 60)
                 logger.info(f"STEP 1: Downloading {max_images} COCO images")
                 logger.info("=" * 60)
-                do_link_on_download = not (skip_link_items or dataset_has_items)
+                do_link_on_download = False if hybrid_storage else not (skip_link_items or dataset_has_items)
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
@@ -5180,7 +5297,8 @@ class ServiceRunner:
         
         # Step 2: Create link items (only when download step was skipped - otherwise links are already ensured in the process-pool)
         # When we ran the download step, each worker ensures file exists + link item with correct URL (create or overwrite) for every item
-        should_skip_link_items = skip_link_items or dataset_has_items or (not should_skip_download)
+        # HYBRID: skip all link-item logic; dataset.sync indexes files from compute storage
+        should_skip_link_items = hybrid_storage or skip_link_items or dataset_has_items or (not should_skip_download)
         if not should_skip_link_items:
             if progress_callback:
                 progress_callback('create_link_items', 'running', 45, f'Creating {len(filenames)} link items...')
@@ -5209,18 +5327,32 @@ class ServiceRunner:
                 created = link_result.get('created', 0)
                 progress_callback('create_link_items', 'completed', 60, f'Created {created} link items')
         else:
-            if not should_skip_download:
+            if hybrid_storage:
+                skip_reason = 'HYBRID: items indexed via dataset.sync(), not link items'
+            elif not should_skip_download:
                 skip_reason = 'Link items already ensured in download step (process-pool)'
             else:
                 skip_reason = 'Dataset already has items' if dataset_has_items else 'Skipped by user'
             results['steps'].append({'step': 'create_link_items', 'skipped': True, 'reason': skip_reason, 'dataset_items': items_count})
             if progress_callback:
-                if not should_skip_download:
+                if hybrid_storage:
+                    progress_callback('create_link_items', 'skipped', 60, skip_reason)
+                elif not should_skip_download:
                     progress_callback('create_link_items', 'skipped', 60, 'Link items ensured in download step')
                 elif dataset_has_items:
                     progress_callback('create_link_items', 'skipped', 45, f'Skipped: Dataset already has {items_count} items')
                 else:
                     progress_callback('create_link_items', 'skipped', 45, 'Skipped link items creation')
+        
+        # HYBRID: sync again after download phase so new files on storage appear as dataset items
+        if hybrid_storage and dataset_id:
+            if progress_callback:
+                progress_callback('dataset_sync', 'running', 62, 'HYBRID: syncing dataset from storage...')
+            logger.info("HYBRID: dataset.sync() after download / link-items phase")
+            self._sync_dataset_after_hybrid_storage(dataset_id)
+            results['steps'].append({'step': 'dataset_sync', 'result': {'dataset_id': dataset_id}})
+            if progress_callback:
+                progress_callback('dataset_sync', 'completed', 64, 'HYBRID: dataset sync completed')
         
         # Step 3: Create pipeline (requires dataset_id)
         pipeline_id = None
