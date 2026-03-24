@@ -3673,7 +3673,9 @@ import io
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
-from PIL import Image
+from PIL import Image, ImageFile
+
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 class ServiceRunner:
 
