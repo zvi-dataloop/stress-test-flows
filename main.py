@@ -3677,6 +3677,9 @@ from PIL import Image, ImageFile
 
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 
+# Match dtlpy.repositories.downloader: full retry of download + open on failure
+NUM_TRIES = 3
+
 class ServiceRunner:
 
     def stream_image(self, item):
@@ -3687,7 +3690,7 @@ class ServiceRunner:
         else:
             stream_url = item.stream
         # Same as dtlpy: Session + Retry + HTTPAdapter, timeout=120, stream + iter_content(8192)
-        retry = Retry(
+        retry_policy = Retry(
             total=5,
             read=5,
             connect=5,
@@ -3695,30 +3698,36 @@ class ServiceRunner:
             status_forcelist=(500, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511),
             raise_on_status=False,
         )
-        adapter = HTTPAdapter(max_retries=retry)
-        session = requests.Session()
-        session.mount("http://", adapter)
-        session.mount("https://", adapter)
-        prepared = requests.Request(
-            method="GET",
-            url=stream_url,
-            headers={
-                "Authorization": "Bearer " + dl.token(),
-                "x-dl-sanitize": "0",
-                "Connection": "keep-alive",
-            },
-        ).prepare()
-        response = session.send(request=prepared, stream=True, timeout=120)
-        response.raise_for_status()
-        image_data = io.BytesIO()
-        for chunk in response.iter_content(chunk_size=8192):
-            if chunk:
-                image_data.write(chunk)
-        image_data.seek(0)
-        with Image.open(image_data) as img:
-            img.verify()
-            print("Success: Valid {} image downloaded.".format(img.format))
-        return item
+        adapter = HTTPAdapter(max_retries=retry_policy)
+        for i_try in range(NUM_TRIES):
+            try:
+                session = requests.Session()
+                session.mount("http://", adapter)
+                session.mount("https://", adapter)
+                prepared = requests.Request(
+                    method="GET",
+                    url=stream_url,
+                    headers={
+                        "Authorization": "Bearer " + dl.token(),
+                        "x-dl-sanitize": "0",
+                        "Connection": "keep-alive",
+                    },
+                ).prepare()
+                with session.send(request=prepared, stream=True, timeout=120) as response:
+                    response.raise_for_status()
+                    image_data = io.BytesIO()
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            image_data.write(chunk)
+                image_data.seek(0)
+                with Image.open(image_data) as img:
+                    fmt = img.format
+                    img.verify()
+                    print("Success: Valid {} image downloaded.".format(fmt))
+                return item
+            except Exception:
+                if i_try + 1 >= NUM_TRIES:
+                    raise
 ''',
                         "name": "run",
                         "type": "code",
