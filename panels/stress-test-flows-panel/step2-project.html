@@ -110,9 +110,6 @@
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
                 Use <strong>Refresh</strong> to load HYBRID drivers for <strong>this project</strong>. By default the list is limited to drivers whose compute matches <strong>this service’s</strong> compute (same resolution as loading storages above), so you only see drivers that belong to this stress-test setup.
             </p>
-            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
-                <strong>Optional environment overrides</strong> (service / deployment): <code>HYBRID_DRIVERS_PROJECT_WIDE=1</code> lists every HYBRID driver in the project (all computes). <code>HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1</code> can include drivers that have no project id in the API if their id appears in the SDK list. Use these only when you understand the broader listing.
-            </p>
             <button type="button" class="btn btn-secondary" onclick="loadHybridDrivers()">🔄 Refresh HYBRID drivers</button>
             <div id="hybridDriversList" style="margin-top: 16px;"></div>
         </div>
