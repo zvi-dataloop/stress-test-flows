@@ -17,7 +17,7 @@ from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 import dtlpy as dl
 import requests
 
@@ -224,6 +224,461 @@ def _storage_path_from_link_base_url(link_base_url: str):
     return '/' + path_inside if not path_inside.startswith('/') else path_inside
 
 
+def _patch_hybrid_driver_path(driver_id: str, path: str) -> bool:
+    """
+    Set HYBRID driver ``path`` via PATCH — create often ignores ``path`` unless the body matches the GET shape.
+    """
+    if not driver_id or not path or not str(path).strip():
+        return False
+    try:
+        success, response = dl.client_api.gen_request(
+            req_type='patch',
+            path='/drivers/{}'.format(str(driver_id).strip()),
+            json_req={'path': str(path).strip()},
+        )
+        if not success:
+            logger.warning(f'PATCH /drivers/{driver_id} path failed: {getattr(response, "text", response)}')
+            return False
+        return True
+    except Exception as e:
+        logger.warning(f'_patch_hybrid_driver_path: {e}')
+        return False
+
+
+def _path_from_driver_entity(d) -> str:
+    """Resolve filesystem path from a Driver entity or raw API dict (top-level or ``payload.path``)."""
+    if d is None:
+        return None
+    raw = getattr(d, 'path', None)
+    if raw is None and isinstance(d, dict):
+        raw = d.get('path')
+        if raw is None:
+            pl = d.get('payload')
+            if isinstance(pl, dict):
+                raw = pl.get('path')
+    if raw is None and hasattr(d, 'to_json'):
+        j = d.to_json()
+        if isinstance(j, dict):
+            raw = j.get('path')
+            if raw is None:
+                pl = j.get('payload')
+                if isinstance(pl, dict):
+                    raw = pl.get('path')
+    if raw is None or (isinstance(raw, str) and not str(raw).strip()):
+        return None
+    p = str(raw).strip()
+    if not p.startswith('/'):
+        p = '/' + p.lstrip('/')
+    return p
+
+
+def _fetch_hybrid_driver_storage_path(driver_id: str, project_id: str):
+    """
+    Filesystem path from the HYBRID (network storage) driver's ``path`` field — same root the dataset uses.
+    Returns None if the driver cannot be loaded or has no path.
+    """
+    if not driver_id or not project_id:
+        return None
+    try:
+        project = dl.projects.get(project_id=project_id)
+        d = project.drivers.get(driver_id=str(driver_id).strip())
+        return _path_from_driver_entity(d)
+    except Exception as e:
+        logger.warning(f'_fetch_hybrid_driver_storage_path: could not read path for driver {driver_id!r}: {e}')
+        return None
+
+
+def _env_service_id_for_hybrid() -> str:
+    """
+    Service UUID for resolving compute (service → driver → computeId) and org (service.org_id).
+
+    Order matches common setups: platform-injected ``SERVICE_ID``, then ``STRESS_TEST_SERVICE_ID``
+    from local tests (see ``test_local.py`` / README).
+    """
+    for key in (
+        'SERVICE_ID',
+        'DL_SERVICE_ID',
+        'DTLPY_SERVICE_ID',
+        'STRESS_TEST_SERVICE_ID',
+    ):
+        v = os.environ.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
+def _is_not_found_error(e: BaseException) -> bool:
+    s = str(e).lower()
+    return '404' in s or 'not found' in s
+
+
+def _compute_id_from_service_entity(svc) -> str:
+    """Resolve compute UUID from a project service entity, or None if no mapping."""
+    drv = getattr(svc, 'driver_id', None)
+    if not drv:
+        return None
+    try:
+        sd = dl.service_drivers.get(drv)
+        cid = getattr(sd, 'compute_id', None)
+        return str(cid).strip() if cid else None
+    except Exception as ex:
+        logger.debug(f'_compute_id_from_service_entity: {ex}')
+        return None
+
+
+def _discover_hybrid_compute_from_project(project) -> dict:
+    """
+    Find a service in the project whose service driver exposes a computeId.
+    Prefers ``stress-test-service``, then other names containing ``stress-test``, then any service.
+    """
+    try:
+        all_services = list(project.services.list())
+    except Exception as e:
+        logger.warning(f'_discover_hybrid_compute_from_project: list services failed: {e}')
+        return None
+
+    def rank(s):
+        n = (getattr(s, 'name', None) or '').lower()
+        if n == 'stress-test-service':
+            return 0
+        if 'stress-test' in n:
+            return 1
+        return 2
+
+    for svc in sorted(all_services, key=rank):
+        sid = getattr(svc, 'id', None)
+        if not sid:
+            continue
+        cid = _compute_id_from_service_entity(svc)
+        if cid:
+            logger.info(
+                f'_discover_hybrid_compute_from_project: using service '
+                f'{getattr(svc, "name", "?")!r} ({sid}) -> compute {cid}'
+            )
+            return {
+                'success': True,
+                'compute_id': cid,
+                'resolution': f'discovered_service:{getattr(svc, "name", "")}',
+                'service_id_used': str(sid).strip(),
+            }
+    return None
+
+
+def _project_org_id(project) -> str:
+    """Return project organization id as string, or None."""
+    try:
+        if isinstance(project.org, dict):
+            oid = project.org.get('id')
+        else:
+            oid = getattr(project.org, 'id', None)
+        return str(oid).strip() if oid else None
+    except Exception:
+        return None
+
+
+def _context_project_id(compute) -> str:
+    """Primary context.project (may be None if compute is org-scoped only)."""
+    try:
+        j = compute.to_json() if hasattr(compute, 'to_json') else {}
+        ctx = j.get('context') if isinstance(j, dict) else None
+        if isinstance(ctx, dict) and 'project' in ctx:
+            p = ctx.get('project')
+            return str(p).strip() if p not in (None, '') else None
+    except Exception:
+        pass
+    ctx = getattr(compute, 'context', None)
+    if isinstance(ctx, dict):
+        p = ctx.get('project')
+        return str(p).strip() if p not in (None, '') else None
+    p = getattr(ctx, 'project', None) if ctx is not None else None
+    return str(p).strip() if p not in (None, '') else None
+
+
+def _compute_linked_to_project(compute, project_id: str) -> bool:
+    """True if the compute's primary or shared context references this project id."""
+
+    def _pid(ctx):
+        if ctx is None:
+            return None
+        if isinstance(ctx, dict):
+            return ctx.get('project')
+        return getattr(ctx, 'project', None)
+
+    try:
+        if _pid(getattr(compute, 'context', None)) == project_id:
+            return True
+        for sc in getattr(compute, 'shared_contexts', None) or []:
+            if _pid(sc) == project_id:
+                return True
+        j = compute.to_json() if hasattr(compute, 'to_json') else {}
+        ctx = j.get('context') if isinstance(j, dict) else None
+        if isinstance(ctx, dict) and ctx.get('project') == project_id:
+            return True
+        for sc in (j.get('sharedContexts') or j.get('shared_contexts') or []) if isinstance(j, dict) else []:
+            if isinstance(sc, dict) and sc.get('project') == project_id:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _compute_org_matches(compute, org_id: str) -> bool:
+    """True if primary or shared context.org equals org_id."""
+
+    def _oid(ctx):
+        if ctx is None:
+            return None
+        if isinstance(ctx, dict):
+            return ctx.get('org')
+        return getattr(ctx, 'org', None)
+
+    try:
+        if _oid(getattr(compute, 'context', None)) == org_id:
+            return True
+        for sc in getattr(compute, 'shared_contexts', None) or []:
+            if _oid(sc) == org_id:
+                return True
+        j = compute.to_json() if hasattr(compute, 'to_json') else {}
+        ctx = j.get('context') if isinstance(j, dict) else None
+        if isinstance(ctx, dict) and ctx.get('org') == org_id:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _compute_usable_for_project(project, compute, project_id: str, org_id: str) -> bool:
+    """
+    A compute can back HYBRID for this project if:
+    - context.project matches this project, or
+    - context.org matches the project's org and context.project is null/empty (org-wide compute).
+    If context.project is set to a *different* project, it is not usable.
+    """
+    if _compute_linked_to_project(compute, project_id):
+        return True
+    if not org_id:
+        return False
+    if not _compute_org_matches(compute, org_id):
+        return False
+    pj = _context_project_id(compute)
+    if pj is None or pj == '':
+        return True
+    return pj == project_id
+
+
+def _discover_compute_id_from_project_context(project) -> dict:
+    """
+    Resolve a compute UUID by listing computes usable for this project.
+
+    Includes **org-scoped** computes (``context.project`` null, ``context.org`` set) when the
+    project shares that org — matching real cluster documents from compute-setup.
+    Uses ``paged.all()`` so computes are not missed on later pages.
+    """
+    project_id = getattr(project, 'id', None)
+    if not project_id:
+        return None
+    project_id = str(project_id).strip()
+    org_id = _project_org_id(project)
+
+    collected = {}  # id -> entity
+
+    def ingest_iter(label: str, it):
+        n = 0
+        for c in it:
+            if _compute_usable_for_project(project, c, project_id, org_id):
+                cid = getattr(c, 'id', None)
+                if cid and cid not in collected:
+                    collected[cid] = c
+                    n += 1
+        if n:
+            logger.info(f'_discover_compute_id_from_project_context: {label} added {n} candidate(s)')
+
+    try:
+        filters = dl.Filters(resource=dl.FiltersResource.COMPUTE)
+        filters.page_size = 500
+        filters.add(
+            field='context.project',
+            values=[project_id],
+            operator=dl.FiltersOperations.EQUAL,
+        )
+        paged = dl.computes.list(filters=filters)
+        ingest_iter('context.project filter', paged.all())
+    except Exception as e:
+        logger.warning(f'_discover_compute_id_from_project_context: project filter: {e}')
+
+    if org_id:
+        try:
+            filters = dl.Filters(resource=dl.FiltersResource.COMPUTE)
+            filters.page_size = 500
+            filters.add(
+                field='context.org',
+                values=[org_id],
+                operator=dl.FiltersOperations.EQUAL,
+            )
+            paged = dl.computes.list(filters=filters)
+            ingest_iter('context.org filter', paged.all())
+        except Exception as e:
+            logger.warning(f'_discover_compute_id_from_project_context: org filter: {e}')
+
+    if not collected:
+        try:
+            filters = dl.Filters(resource=dl.FiltersResource.COMPUTE)
+            filters.page_size = 500
+            paged = dl.computes.list(filters=filters)
+            ingest_iter('unfiltered scan', paged.all())
+        except Exception as e:
+            logger.warning(f'_discover_compute_id_from_project_context: unfiltered scan: {e}')
+
+    if not collected:
+        return None
+
+    def rank_key(c):
+        st = getattr(c, 'status', None)
+        if hasattr(st, 'value'):
+            st = st.value
+        st = str(st or '').lower()
+        linked = 0 if _compute_linked_to_project(c, project_id) else 1
+        ready = 0 if st == 'ready' else 1
+        name = (getattr(c, 'name', None) or '')
+        return (linked, ready, name)
+
+    items = sorted(collected.values(), key=rank_key)
+    best = items[0]
+    cid = getattr(best, 'id', None)
+    if not cid:
+        return None
+    res_tag = (
+        'project_compute_list'
+        if _compute_linked_to_project(best, project_id)
+        else 'org_compute_list'
+    )
+    if len(items) > 1:
+        logger.warning(
+            f'_discover_compute_id_from_project_context: {len(items)} computes match; '
+            f'using {cid!r} ({getattr(best, "name", "")!r}). Link a compute to this project for a unique match.'
+        )
+    logger.info(
+        f'_discover_compute_id_from_project_context: using compute {cid!r} '
+        f'(name={getattr(best, "name", None)!r}, status={getattr(best, "status", None)!r}, resolution={res_tag})'
+    )
+    return {
+        'success': True,
+        'compute_id': str(cid).strip(),
+        'resolution': res_tag,
+        'service_id_used': None,
+    }
+
+
+def _storage_name_from_plugin_item(item) -> str:
+    """Single storage entry from compute dataset plugin (dict or string)."""
+    if isinstance(item, str):
+        t = item.strip()
+        return t or None
+    if isinstance(item, dict):
+        n = item.get('name') or item.get('storageName') or item.get('storage_name') or item.get('id')
+        if n is not None:
+            t = str(n).strip()
+            return t or None
+    return None
+
+
+def _storage_type_from_plugin_item(item) -> str:
+    if isinstance(item, dict):
+        t = item.get('type')
+        if t is not None:
+            s = str(t).strip()
+            return s or None
+    return None
+
+
+def _collect_storage_entries_from_dataset_plugin_dict(ds: dict, out: list, seen: set) -> None:
+    """Collect ``{name, type}`` entries from a dataset / storage-driver plugin configuration object."""
+    if not isinstance(ds, dict):
+        return
+    for sk in ('storages', 'Storages', 'storage', 'Storage'):
+        val = ds.get(sk)
+        if isinstance(val, list):
+            for item in val:
+                n = _storage_name_from_plugin_item(item)
+                if n and n not in seen:
+                    seen.add(n)
+                    out.append({'name': n, 'type': _storage_type_from_plugin_item(item)})
+        elif isinstance(val, str):
+            n = val.strip()
+            if n and n not in seen:
+                seen.add(n)
+                out.append({'name': n, 'type': None})
+    for nested_key in ('config', 'configuration', 'settings', 'params'):
+        nested = ds.get(nested_key)
+        if isinstance(nested, dict):
+            _collect_storage_entries_from_dataset_plugin_dict(nested, out, seen)
+
+
+def storage_entries_from_compute_dataset_plugin(compute) -> list:
+    """
+    Storage entries ``{name, type}`` from compute cluster plugins (same sources as
+    :func:`storages_from_compute_dataset_plugin`). ``type`` is the plugin item's ``type`` (e.g. nfs, s3) when present.
+    """
+    out: list = []
+    seen: set = set()
+    try:
+        j = compute.to_json() if hasattr(compute, 'to_json') else {}
+    except Exception:
+        j = {}
+    if not isinstance(j, dict):
+        return out
+    cluster = j.get('cluster')
+    if not isinstance(cluster, dict):
+        return out
+    plugins = cluster.get('plugins')
+
+    if isinstance(plugins, list):
+        for plug in plugins:
+            if not isinstance(plug, dict):
+                continue
+            pname = (plug.get('name') or '').lower()
+            if pname in ('storage-driver', 'storage_driver', 'dataset', 'data-set'):
+                cfg = plug.get('config') or plug.get('configuration') or {}
+                if isinstance(cfg, dict):
+                    _collect_storage_entries_from_dataset_plugin_dict(cfg, out, seen)
+                _collect_storage_entries_from_dataset_plugin_dict(plug, out, seen)
+        if not out:
+            for plug in plugins:
+                if isinstance(plug, dict):
+                    _collect_storage_entries_from_dataset_plugin_dict(plug, out, seen)
+
+    elif isinstance(plugins, dict):
+        for pk in ('dataset', 'Dataset', 'dataSet', 'storage-driver', 'storage_driver'):
+            ds = plugins.get(pk)
+            if isinstance(ds, dict):
+                _collect_storage_entries_from_dataset_plugin_dict(ds, out, seen)
+
+    if not out:
+        for _k, v in cluster.items():
+            if isinstance(v, dict) and 'storages' in v:
+                _collect_storage_entries_from_dataset_plugin_dict(v, out, seen)
+            elif isinstance(v, list) and _k.lower() == 'storages':
+                for item in v:
+                    n = _storage_name_from_plugin_item(item)
+                    if n and n not in seen:
+                        seen.add(n)
+                        out.append({'name': n, 'type': _storage_type_from_plugin_item(item)})
+    return out
+
+
+def storages_from_compute_dataset_plugin(compute) -> list:
+    """
+    Storage **names** from compute cluster plugins (compute-setup format).
+
+    Supports:
+
+    - **Array** ``cluster.plugins``: ``[{ "name": "storage-driver", "config": { "storages": [...] } }, ...]``
+      (FaaS / hybrid clusters — storages often live here, not under ``dataset``).
+    - **Dict** ``cluster.plugins``: legacy ``dataset`` / ``storage-driver`` keys.
+    """
+    return [e['name'] for e in storage_entries_from_compute_dataset_plugin(compute)]
+
+
 def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full: str, overwrite: bool = True):
     """Create or update one link item in dataset. Used inside worker process (no self).
     overwrite=True ensures existing items get the correct link URL (create or replace).
@@ -388,10 +843,10 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 self._get_workflow_progress(workflow_id)
             elif path == '/api/active-workflow' or path.startswith('/api/active-workflow'):
                 self._get_active_workflow()
-            elif path == '/api/gcs-integrations' or path.startswith('/api/gcs-integrations'):
-                self._list_gcs_integrations()
-            elif path == '/api/faas-proxy-drivers' or path.startswith('/api/faas-proxy-drivers'):
-                self._list_faas_proxy_drivers()
+            elif path == '/api/hybrid-drivers' or path.startswith('/api/hybrid-drivers'):
+                self._list_hybrid_drivers()
+            elif path == '/api/hybrid-compute-storages' or path.startswith('/api/hybrid-compute-storages'):
+                self._list_hybrid_compute_storages()
             elif path == '/api/org-access' or path.startswith('/api/org-access'):
                 self._check_org_access()
             elif path == '/api/nginx-rps' or path.startswith('/api/nginx-rps'):
@@ -525,8 +980,6 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 self._execute_service_function(data)
             elif parsed.path == '/api/run-full':
                 self._run_full_workflow(data)
-            elif parsed.path == '/api/create-faas-proxy-driver':
-                self._create_faas_proxy_driver(data)
             elif parsed.path == '/api/create-hybrid-driver':
                 self._create_hybrid_driver(data)
             elif parsed.path.startswith('/api/cancel-workflow/'):
@@ -603,25 +1056,25 @@ class StressTestHandler(SimpleHTTPRequestHandler):
         except Exception as e:
             self._send_error(500, str(e))
     
-    def _list_gcs_integrations(self):
-        """List all GCS integrations in the organization"""
+    def _list_hybrid_drivers(self):
+        """List all HYBRID (compute storage) drivers for the project"""
         try:
             project = self._get_project()
-            result = _stress_test_server_instance.list_gcs_integrations()
+            result = _stress_test_server_instance.list_hybrid_drivers(project_id=project.id)
             self._send_json(result)
         except Exception as e:
-            logger.error(f"Error listing GCS integrations: {e}", exc_info=True)
-            self._send_json({'success': False, 'error': str(e), 'integrations': []})
-    
-    def _list_faas_proxy_drivers(self):
-        """List all faasProxy drivers for the project"""
-        try:
-            project = self._get_project()
-            result = _stress_test_server_instance.list_faas_proxy_drivers(project_id=project.id)
-            self._send_json(result)
-        except Exception as e:
-            logger.error(f"Error listing faasProxy drivers: {e}", exc_info=True)
+            logger.error(f"Error listing HYBRID drivers: {e}", exc_info=True)
             self._send_json({'success': False, 'error': str(e), 'drivers': []})
+    
+    def _list_hybrid_compute_storages(self):
+        """GET storages from compute dataset plugin (for HYBRID driver form)."""
+        try:
+            project = self._get_project()
+            result = _stress_test_server_instance.list_hybrid_compute_storages(project_id=project.id)
+            self._send_json(result)
+        except Exception as e:
+            logger.error(f"Error listing hybrid compute storages: {e}", exc_info=True)
+            self._send_json({'success': False, 'error': str(e), 'storages': [], 'count': 0})
     
     def _check_org_access(self):
         """Check if current identity has org-level permission"""
@@ -955,37 +1408,6 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _create_faas_proxy_driver(self, data):
-        """Create a faasProxy storage driver"""
-        try:
-            project = self._get_project()
-            project_id = project.id
-            
-            driver_name = data.get('driverName') or data.get('driver_name')
-            integration_id = data.get('integrationId') or data.get('integration_id')
-            integration_type = data.get('integrationType') or data.get('integration_type')
-            bucket_name = data.get('bucketName') or data.get('bucket_name')
-            path = data.get('path')
-            allow_external_delete = data.get('allowExternalDelete', data.get('allow_external_delete', True))
-            
-            if not driver_name or not integration_id or not bucket_name:
-                self._send_error(400, 'driverName, integrationId, and bucketName are required')
-                return
-            
-            result = _stress_test_server_instance.create_faas_proxy_driver(
-                project_id=project_id,
-                driver_name=driver_name,
-                integration_id=integration_id,
-                integration_type=integration_type,
-                bucket_name=bucket_name,
-                path=path,
-                allow_external_delete=allow_external_delete
-            )
-            self._send_json(result)
-        except Exception as e:
-            logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
-            self._send_json({'success': False, 'error': str(e)})
-    
     def _create_hybrid_driver(self, data):
         """Create a HYBRID external storage driver (compute storage)."""
         try:
@@ -993,7 +1415,12 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             driver_name = data.get('driverName') or data.get('driver_name')
             compute_id = data.get('computeId') or data.get('compute_id')
             compute_storage_name = data.get('computeStorageName') or data.get('compute_storage_name')
+            service_driver_id = data.get('serviceDriverId') or data.get('service_driver_id')
+            service_id = data.get('serviceId') or data.get('service_id')
+            compute_name = data.get('computeName') or data.get('compute_name')
             org_id = data.get('orgId') or data.get('org_id')
+            if isinstance(org_id, str):
+                org_id = org_id.strip() or None
             path = data.get('path')
             if isinstance(path, str):
                 path = path.strip()
@@ -1003,8 +1430,8 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                     path = _storage_path_from_link_base_url(link_base.strip()) or DEFAULT_STORAGE_BASE_PATH
                 else:
                     path = DEFAULT_STORAGE_BASE_PATH  # e.g. /s/pd_datfs2/stress-test
-            if not driver_name or not compute_id or not compute_storage_name:
-                self._send_error(400, 'driverName, computeId, and computeStorageName are required')
+            if not driver_name or not compute_storage_name:
+                self._send_error(400, 'driverName and computeStorageName are required')
                 return
             result = _stress_test_server_instance.create_hybrid_storage_driver(
                 project_id=project.id,
@@ -1013,6 +1440,9 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 compute_storage_name=compute_storage_name,
                 org_id=org_id,
                 path=path,
+                service_driver_id=service_driver_id,
+                service_id=service_id,
+                compute_name=compute_name,
             )
             self._send_json(result)
         except Exception as e:
@@ -1201,7 +1631,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "skipPipeline": false,  # or "skip_pipeline"
             "skipExecute": false,  # or "skip_execute"
             "linkBaseUrl": "...",  # or "link_base_url" (optional, base URL for link items)
-            "hybridStorage": false,  # or "hybrid_storage" - HYBRID driver: no link items; dataset.sync() indexes files
+            "hybridStorage": true,  # or "hybrid_storage" - HYBRID driver: no link items; dataset.sync() indexes files
         }
         
         Note: Service ID and Project ID are automatically detected - no need to provide them.
@@ -1247,7 +1677,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                 link_base_url = link_base_url.strip()
             if link_base_url is None or link_base_url == '':
                 link_base_url = DEFAULT_LINK_BASE_URL
-            _hybrid_raw = data.get('hybridStorage', data.get('hybrid_storage', False))
+            _hybrid_raw = data.get('hybridStorage', data.get('hybrid_storage', True))
             hybrid_storage = _hybrid_raw if isinstance(_hybrid_raw, bool) else str(_hybrid_raw).lower() in ('1', 'true', 'yes', 'on')
             logger.info(f"Workflow params: dataset_id={dataset_id_param!r}, create_dataset={create_dataset}, link_base_url={link_base_url!r}, hybrid_storage={hybrid_storage}")
             
@@ -1348,7 +1778,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
                            create_dataset, skip_download, skip_link_items, skip_pipeline, skip_execute,
                            link_base_url, pipeline_concurrency, pipeline_max_replicas,
                            stream_image_concurrency, stream_image_max_replicas, resnet_concurrency, resnet_max_replicas,
-                           hybrid_storage=False):
+                           hybrid_storage=True):
         """Run workflow in background thread with progress updates"""
         try:
             def update_progress(step, status, progress_pct, message, result=None, error=None):
@@ -2433,426 +2863,413 @@ class StressTestServer(dl.BaseServiceRunner):
                 'message': str(e)
             }
     
-    def list_gcs_integrations(self, organization_id: str = None) -> dict:
+    def list_hybrid_drivers(self, project_id: str = None) -> dict:
         """
-        List all GCS integrations in the organization.
-        
-        Args:
-            organization_id: Organization ID (if None, uses project's organization)
-        
-        Returns:
-            dict with list of GCS integrations
-        """
-        try:
-            if organization_id is None:
-                project = dl.projects.get(project_id=self.project_id)
-                # Handle both dict and SDK object for project.org
-                if isinstance(project.org, dict):
-                    org_id = project.org.get('id')
-                    if not org_id:
-                        raise ValueError("Could not get organization ID from project")
-                    organization = dl.organizations.get(organization_id=org_id)
-                else:
-                    organization = project.org
-            else:
-                organization = dl.organizations.get(organization_id=organization_id)
-            
-            gcs_integrations = []
-            all_integrations = organization.integrations.list()
-            
-            for integration in all_integrations:
-                # Check if it's a GCS integration
-                integration_type = None
-                if hasattr(integration, 'type'):
-                    integration_type = integration.type
-                elif hasattr(integration, 'integrations_type'):
-                    integration_type = integration.integrations_type
-                elif isinstance(integration, dict):
-                    integration_type = integration.get('type')
-                else:
-                    integration_type = getattr(integration, 'type', None)
-                
-                # Get name and ID
-                if isinstance(integration, dict):
-                    integration_name = integration.get('name', 'Unknown')
-                    integration_id = integration.get('id', 'Unknown')
-                else:
-                    integration_name = getattr(integration, 'name', 'Unknown')
-                    integration_id = getattr(integration, 'id', 'Unknown')
-                
-                # Check if it matches GCS type (including gcp-workload-identity-federation)
-                is_gcs = False
-                if integration_type:
-                    type_str = str(integration_type).lower().strip()
-                    if (integration_type == dl.ExternalStorage.GCS or 
-                        type_str == 'gcs' or
-                        type_str == 'gcp-workload-identity-federation' or
-                        'gcs' in type_str or 'google' in type_str or 'workload-identity' in type_str):
-                        is_gcs = True
-                else:
-                    # Fallback: check name
-                    name_lower = integration_name.lower()
-                    if 'gcs' in name_lower or 'google' in name_lower or 'workload-identity' in name_lower:
-                        is_gcs = True
-                
-                if is_gcs:
-                    gcs_integrations.append({
-                        'id': integration_id,
-                        'name': integration_name,
-                        'type': str(integration_type) if integration_type else 'gcs'
-                    })
-            
-            return {
-                'success': True,
-                'integrations': gcs_integrations,
-                'count': len(gcs_integrations)
-            }
-        except Exception as e:
-            logger.error(f"Error listing GCS integrations: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e),
-                'integrations': []
-            }
-    
-    def list_faas_proxy_drivers(self, project_id: str = None) -> dict:
-        """
-        List all faasProxy drivers for a project.
-        
-        Args:
-            project_id: Project ID (if None, uses self.project_id)
-        
-        Returns:
-            dict with list of faasProxy drivers
+        List HYBRID drivers for **this project** and **this service compute** (see ``HYBRID_DRIVERS_PROJECT_WIDE``).
+
+        Project scoping: keep only drivers whose ``projectId`` / ``metadata.system.projectId`` equals this
+        project. Rows **without** project fields are excluded unless
+        ``HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1`` (then SDK HYBRID id allowlist applies).
+
+        Compute scoping: unless ``HYBRID_DRIVERS_PROJECT_WIDE=1``, keep only drivers whose ``computeId``
+        matches ``resolve_hybrid_compute_id`` (same as storages).
         """
         try:
             if project_id is None:
                 project_id = self.project_id
+            if not project_id:
+                return {'success': False, 'error': 'project_id is required', 'drivers': [], 'project_id': None}
+            project_id = str(project_id).strip()
             project = dl.projects.get(project_id=project_id)
-            
-            faas_proxy_drivers = []
-            all_drivers = project.drivers.list()
-            
-            for driver in all_drivers:
-                driver_type = getattr(driver, 'type', None) or getattr(driver, 'driverType', None)
-                if driver_type == 'faasProxy':
-                    driver_info = {
-                        'id': driver.id,
-                        'name': driver.name,
-                        'type': driver_type,
-                        'bucket': getattr(driver, 'bucket', None),
-                        'path': getattr(driver, 'path', None),
-                        'allow_external_delete': getattr(driver, 'allow_external_delete', None),
-                        'integration_id': getattr(driver, 'integration_id', None)
-                    }
-                    faas_proxy_drivers.append(driver_info)
-            
-            return {
-                'success': True,
-                'drivers': faas_proxy_drivers,
-                'count': len(faas_proxy_drivers)
-            }
-        except Exception as e:
-            logger.error(f"Error listing faasProxy drivers: {e}", exc_info=True)
-            return {
-                'success': False,
-                'error': str(e),
-                'drivers': []
-            }
-    
-    def create_faas_proxy_driver(self, project_id: str = None, driver_name: str = None,
-                                 integration_id: str = None, integration_type: str = None,
-                                 bucket_name: str = None, path: str = None, 
-                                 allow_external_delete: bool = True) -> dict:
-        """
-        Create a faasProxy storage driver.
-        
-        Args:
-            project_id: Project ID (if None, uses self.project_id)
-            driver_name: Driver name
-            integration_id: GCS integration ID
-            bucket_name: GCS bucket name
-            path: Optional path within bucket
-            allow_external_delete: Allow external delete
-        
-        Returns:
-            dict with driver info
-        """
-        try:
-            if project_id is None:
-                project_id = self.project_id
-            project = dl.projects.get(project_id=project_id)
-            
-            # Get integration - handle both dict and SDK object for project.org
-            if isinstance(project.org, dict):
-                org_id = project.org.get('id')
-                if not org_id:
-                    return {
-                        'success': False,
-                        'error': 'Could not get organization ID from project'
-                    }
-                organization = dl.organizations.get(organization_id=org_id)
-            else:
-                organization = project.org
-            
-            # If integration_type is provided (manual mode), use it directly
-            # Otherwise, try to look up the integration to get its type
-            integration_id_val = integration_id
-            integration_type_obj = None
-            
-            if integration_type:
-                # Use provided integration type (from manual input)
-                integration_type_obj = integration_type
-            else:
-                # Try to look up the integration to get its type
+            # HYBRID driver ids from SDK (same project-scoped list; used when API payload omits projectId)
+            sdk_hybrid_ids = set()
+            try:
+                for d in project.drivers.list():
+                    dtype = getattr(d, 'type', None) or getattr(d, 'driverType', None)
+                    if hasattr(dtype, 'value'):
+                        dtype = dtype.value
+                    if str(dtype or '').lower() != 'hybrid':
+                        continue
+                    if getattr(d, 'id', None):
+                        sdk_hybrid_ids.add(str(d.id).strip())
+            except Exception as e:
+                logger.warning(f'list_hybrid_drivers: could not list SDK HYBRID drivers for allowlist: {e}')
+
+            q = quote(project_id, safe='')
+            success, response = dl.client_api.gen_request(
+                req_type='get',
+                path='/drivers?projectId={}'.format(q),
+            )
+            if not success:
+                err = getattr(response, 'text', None) or str(response)
                 try:
-                    all_integrations = organization.integrations.list()
-                    integration = None
-                    
-                    for int_obj in all_integrations:
-                        int_id = int_obj.get('id') if isinstance(int_obj, dict) else getattr(int_obj, 'id', None)
-                        if int_id == integration_id:
-                            integration = int_obj
-                            break
-                    
-                    if integration:
-                        # Get integration type from the integration object
-                        if isinstance(integration, dict):
-                            integration_type_obj = integration.get('type')
-                        else:
-                            if hasattr(integration, 'type'):
-                                integration_type_obj = integration.type
-                            elif hasattr(integration, 'integrations_type'):
-                                integration_type_obj = integration.integrations_type
+                    err = response.json().get('message', err)
+                except Exception:
+                    pass
+                return {
+                    'success': False,
+                    'error': err,
+                    'drivers': [],
+                    'project_id': project_id,
+                }
+            raw = response.json()
+            if not isinstance(raw, list):
+                raw = []
+
+            def _record_project_id(d: dict) -> str:
+                pid = d.get('projectId') or d.get('project_id')
+                if pid is not None and str(pid).strip():
+                    return str(pid).strip()
+                meta = d.get('metadata')
+                if isinstance(meta, dict):
+                    sys = meta.get('system')
+                    if isinstance(sys, dict):
+                        pid = sys.get('projectId') or sys.get('project_id')
+                        if pid is not None and str(pid).strip():
+                            return str(pid).strip()
+                return None
+
+            def _is_hybrid(d: dict) -> bool:
+                dtype = d.get('type') or d.get('driverType')
+                if hasattr(dtype, 'value'):
+                    dtype = dtype.value
+                return str(dtype or '').lower() == 'hybrid'
+
+            hybrid_raw = [d for d in raw if isinstance(d, dict) and _is_hybrid(d)]
+
+            # Project scope: always drop drivers whose explicit projectId ≠ this project.
+            # Drivers with **no** projectId on the payload are ambiguous (same compute can serve multiple
+            # projects). By default we **exclude** them; set HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1
+            # to allow those whose id appears in project.drivers.list() HYBRIDs.
+            allow_sdk_unscoped = os.environ.get(
+                'HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID', ''
+            ).strip().lower() in ('1', 'true', 'yes', 'on')
+
+            chosen = []
+            excluded_other_project = 0
+            for d in hybrid_raw:
+                rid = str(d.get('id') or '').strip()
+                rp = _record_project_id(d)
+                if rp is not None:
+                    if rp != project_id:
+                        excluded_other_project += 1
+                        continue
+                    chosen.append(d)
+                    continue
+                if allow_sdk_unscoped and rid and rid in sdk_hybrid_ids:
+                    chosen.append(d)
+            if excluded_other_project:
+                logger.info(
+                    f'list_hybrid_drivers: excluded {excluded_other_project} HYBRID driver(s) '
+                    f'with projectId != {project_id}'
+                )
+            if not hybrid_raw:
+                filter_mode = 'empty'
+            elif not chosen:
+                filter_mode = 'no_project_match'
+            else:
+                filter_mode = 'project_scoped+explicit_or_sdk' if allow_sdk_unscoped else 'project_scoped+explicit_project_id_only'
+
+            # Scope to **this service’s compute** (same resolution as storages / HYBRID create), not every
+            # HYBRID driver in the project (often dozens across experiments / computes).
+            project_wide = os.environ.get('HYBRID_DRIVERS_PROJECT_WIDE', '').strip().lower() in (
+                '1', 'true', 'yes', 'on',
+            )
+            service_compute_id = None
+            compute_filter_applied = False
+            if not project_wide and chosen:
+                try:
+                    res = self.resolve_hybrid_compute_id(
+                        project_id=project_id,
+                        compute_id=None,
+                        service_driver_id=None,
+                        service_id=None,
+                        compute_name=None,
+                    )
+                    if res.get('success') and res.get('compute_id'):
+                        service_compute_id = str(res['compute_id']).strip()
+                        before_n = len(chosen)
+                        chosen = [
+                            d for d in chosen
+                            if str(d.get('computeId') or d.get('compute_id') or '').strip() == service_compute_id
+                        ]
+                        compute_filter_applied = True
+                        filter_mode = f'{filter_mode}+service_compute'
+                        if before_n and not chosen:
+                            logger.info(
+                                'list_hybrid_drivers: no HYBRID drivers on service compute %s '
+                                '(project had %s candidate(s); set HYBRID_DRIVERS_PROJECT_WIDE=1 for full project list)',
+                                service_compute_id,
+                                before_n,
+                            )
+                except Exception as ex:
+                    logger.warning(f'list_hybrid_drivers: service compute filter skipped: {ex}')
+
+            hybrid_drivers = []
+            for d in chosen:
+                pl = d.get('payload') if isinstance(d, dict) else None
+                path_val = d.get('path')
+                if path_val is None and isinstance(pl, dict):
+                    path_val = pl.get('path')
+                hybrid_drivers.append({
+                    'id': d.get('id'),
+                    'name': d.get('name'),
+                    'type': 'hybrid',
+                    'path': path_val,
+                    'compute_id': d.get('computeId') or d.get('compute_id'),
+                    'compute_storage_name': d.get('computeStorageName') or d.get('compute_storage_name'),
+                })
+            return {
+                'success': True,
+                'drivers': hybrid_drivers,
+                'count': len(hybrid_drivers),
+                'project_id': project_id,
+                'filter': filter_mode,
+                'service_compute_id': service_compute_id,
+                'compute_filter_applied': compute_filter_applied,
+                'project_wide_listing': project_wide,
+                'allow_sdk_unscoped': allow_sdk_unscoped,
+            }
+        except Exception as e:
+            logger.error(f"Error listing HYBRID drivers: {e}", exc_info=True)
+            return {
+                'success': False,
+                'error': str(e),
+                'drivers': [],
+                'project_id': getattr(self, 'project_id', None),
+            }
+    
+    def list_hybrid_compute_storages(self, project_id: str = None) -> dict:
+        """
+        List storages from the resolved compute’s cluster plugins (``storage-driver`` / ``dataset``).
+
+        Each item is ``{ "name": "...", "type": "nfs" }`` when the plugin entry includes ``type``, else ``{ "name": "..." }``.
+
+        Compute is resolved using the same env chain as HYBRID create (``SERVICE_ID``, ``STRESS_TEST_SERVICE_ID``, etc.).
+        """
+        try:
+            if project_id is None:
+                project_id = self.project_id
+            resolved = self.resolve_hybrid_compute_id(
+                project_id=project_id,
+                compute_id=None,
+                service_driver_id=None,
+                service_id=None,
+                compute_name=None,
+            )
+            if not resolved.get('success'):
+                return {
+                    'success': False,
+                    'error': resolved.get('error', 'Could not resolve compute'),
+                    'storages': [],
+                    'count': 0,
+                }
+            compute_id = resolved['compute_id']
+            compute = dl.computes.get(compute_id=compute_id)
+            entries = storage_entries_from_compute_dataset_plugin(compute)
+            storages_payload = []
+            for e in entries:
+                row = {'name': e['name']}
+                if e.get('type'):
+                    row['type'] = e['type']
+                storages_payload.append(row)
+            return {
+                'success': True,
+                'storages': storages_payload,
+                'compute_id': compute_id,
+                'compute_resolution': resolved.get('resolution'),
+                'service_id_used': resolved.get('service_id_used'),
+                'count': len(storages_payload),
+            }
+        except Exception as e:
+            logger.error(f'Error listing hybrid compute storages: {e}', exc_info=True)
+            return {'success': False, 'error': str(e), 'storages': [], 'count': 0}
+    
+    def resolve_hybrid_compute_id(
+        self,
+        project_id: str = None,
+        compute_id: str = None,
+        service_driver_id: str = None,
+        service_id: str = None,
+        compute_name: str = None,
+    ) -> dict:
+        """
+        Resolve the compute UUID needed for HYBRID driver creation.
+
+        Priority when ``compute_id`` is not set:
+        1. ``service_driver_id`` → ``dl.service_drivers.get`` → ``compute_id``
+        2. ``service_id`` / env (``SERVICE_ID``, ``STRESS_TEST_SERVICE_ID``, …) → project service → driver → compute
+        3. If that service id is **not in the project** (404) or has no compute mapping → **discover** any project
+           service whose driver maps to a compute (prefers ``stress-test-service``, then names containing ``stress-test``)
+        4. **List computes** for this project: ``context.project``, or same **org** with ``context.project`` null
+        5. ``compute_name`` → ``dl.computes.list`` by name
+
+        Returns:
+            dict with ``success``, ``compute_id``, ``resolution``, optional ``service_id_used`` (for org lookup), or ``error``.
+        """
+        def _strip(s):
+            if s is None:
+                return None
+            if isinstance(s, str):
+                t = s.strip()
+                return t or None
+            return s
+
+        compute_id = _strip(compute_id)
+        service_driver_id = _strip(service_driver_id)
+        service_id = _strip(service_id)
+        compute_name = _strip(compute_name)
+
+        if compute_id:
+            return {'success': True, 'compute_id': compute_id, 'resolution': 'explicit_compute_id'}
+
+        try:
+            if project_id is None:
+                project_id = self.project_id
+            project = dl.projects.get(project_id=project_id)
+
+            if service_driver_id:
+                sd = dl.service_drivers.get(service_driver_id)
+                cid = getattr(sd, 'compute_id', None)
+                if not cid:
+                    return {'success': False, 'error': f'Service driver {service_driver_id!r} has no computeId'}
+                return {'success': True, 'compute_id': cid, 'resolution': f'service_driver:{service_driver_id}'}
+
+            sid = service_id or _env_service_id_for_hybrid()
+            sid = _strip(sid)
+            if sid:
+                try:
+                    svc = project.services.get(service_id=sid)
                 except Exception as e:
-                    logger.warning(f"Could not look up integration type: {e}, using default 'gcs'")
-            
-            # Default to 'gcs' if we couldn't determine the type
-            if integration_type_obj is None:
-                integration_type_obj = 'gcs'
-            
-            # Check if driver already exists
-            existing_drivers = self.list_faas_proxy_drivers(project_id=project_id)
-            if existing_drivers.get('success'):
-                for driver_info in existing_drivers.get('drivers', []):
-                    if driver_info['name'] == driver_name:
+                    if _is_not_found_error(e):
+                        logger.warning(
+                            f'resolve_hybrid_compute_id: service {sid!r} not in this project ({e}); '
+                            f'trying discovery'
+                        )
+                    else:
+                        raise
+                else:
+                    cid = _compute_id_from_service_entity(svc)
+                    if cid:
                         return {
                             'success': True,
-                            'driver': driver_info,
-                            'exists': True,
-                            'message': 'Driver already exists'
+                            'compute_id': cid,
+                            'resolution': f'service:{sid}',
+                            'service_id_used': sid,
                         }
-            
-            # Convert integration_type to string
-            if isinstance(integration_type_obj, str):
-                integration_type_str = integration_type_obj
-            elif hasattr(integration_type_obj, 'value'):
-                integration_type_str = integration_type_obj.value
-            elif integration_type_obj == dl.ExternalStorage.GCS:
-                integration_type_str = 'gcs'
-            else:
-                integration_type_str = str(integration_type_obj).lower()
-            
-            # Get organization ID - handle both dict and SDK object
-            if isinstance(organization, dict):
-                org_id = organization.get('id')
-            else:
-                org_id = organization.id
-            
-            if not org_id:
-                return {
-                    'success': False,
-                    'error': 'Could not determine organization ID'
-                }
-            
-            # Build payload
-            payload = {
-                "integrationId": integration_id_val,
-                "integrationType": integration_type_str,
-                "name": driver_name,
-                "metadata": {
-                    "system": {
-                        "projectId": project.id
-                    }
-                },
-                "type": "faasProxy",
-                "payload": {
-                    "bucket": bucket_name
-                },
-                "allowExternalDelete": allow_external_delete,
-                "creator": project._client_api.info().get("user_email", ""),
-            }
-            
-            if path:
-                payload["payload"]["path"] = path
-            
-            # Create driver using direct API call (requests.post so we always get response body on error)
-            base_url = (dl.environment() or '').strip().rstrip('/')
-            if not base_url:
-                try:
-                    base_url = dl.client_api.environment
-                except (KeyError, TypeError):
-                    pass
-            api_url = f"{base_url}/drivers" if base_url else None
-            if not api_url or not api_url.startswith('http'):
-                return {'success': False, 'error': 'Could not determine API base URL', 'message': 'Could not determine API base URL'}
-            headers = {'Authorization': f'Bearer {dl.token()}', 'Content-Type': 'application/json'}
-            resp = requests.post(api_url, json=payload, headers=headers, timeout=60)
-            if not resp.ok:
-                # Always have response body from requests
-                resp_dict = {}
-                try:
-                    resp_dict = resp.json()
-                except Exception:
-                    if resp.text:
-                        resp_dict = {'message': resp.text}
-                err_list = resp_dict.get('errors')
-                if isinstance(err_list, list) and err_list:
-                    parts = []
-                    for e in err_list:
-                        if isinstance(e, str):
-                            parts.append(e)
-                        elif isinstance(e, dict):
-                            parts.append(e.get('message') or e.get('error') or str(e))
-                        else:
-                            parts.append(str(e))
-                    error_str = ', '.join(parts)
-                else:
-                    error_str = (
-                        resp_dict.get('error') or
-                        resp_dict.get('message') or
-                        (str(err_list) if err_list is not None else None) or
-                        resp.text or f'HTTP {resp.status_code}'
+                    logger.info(
+                        f'resolve_hybrid_compute_id: service {sid!r} has no usable compute mapping; '
+                        f'trying discovery'
                     )
-                error_str = error_str if isinstance(error_str, str) else str(error_str)
-                return {
-                    'success': False,
-                    'error': error_str,
-                    'message': error_str
-                }
-            try:
-                driver_data = resp.json()
-            except Exception:
-                driver_data = {}
-            
-            driver_id = driver_data.get('id') or driver_data.get('driverId')
-            driver_name_result = driver_data.get('name', driver_name)
-            
-            if not driver_id:
-                return {
-                    'success': False,
-                    'error': f'Driver created but no ID returned: {driver_data}'
-                }
-            
-            return {
-                'success': True,
-                'driver': {
-                    'id': driver_id,
-                    'name': driver_name_result,
-                    'type': 'faasProxy',
-                    'bucket': bucket_name,
-                    'path': path
-                },
-                'exists': False,
-                'message': 'Driver created successfully'
-            }
+
+            discovered = _discover_hybrid_compute_from_project(project)
+            if discovered:
+                return discovered
+
+            listed = _discover_compute_id_from_project_context(project)
+            if listed:
+                return listed
+
+            if compute_name:
+                filters = dl.Filters(resource=dl.FiltersResource.COMPUTE)
+                filters.add(
+                    field='name',
+                    values=[compute_name],
+                    operator=dl.FiltersOperations.EQUAL,
+                )
+                paged = dl.computes.list(filters=filters)
+                paged.get_page()
+                items = list(paged.items) if paged.items else []
+                if not items:
+                    return {'success': False, 'error': f'No compute found with name={compute_name!r}'}
+                if len(items) > 1:
+                    logger.warning(f'Multiple computes matched name={compute_name!r}; using first id={items[0].id}')
+                cid = items[0].id
+                return {'success': True, 'compute_id': cid, 'resolution': f'compute_name:{compute_name}'}
+
         except Exception as e:
-            logger.error(f"Error creating faasProxy driver: {e}", exc_info=True)
-            err_msg = str(e)
-            # Try to extract API error from exception (response body, args, or str(e))
+            logger.error(f'resolve_hybrid_compute_id failed: {e}', exc_info=True)
+            return {'success': False, 'error': str(e)}
+
+        return {
+            'success': False,
+            'error': (
+                'Could not resolve compute: no service driver maps to a compute, and no compute matches this '
+                'project (context.project) or org (context.org with null project). Link the compute to the '
+                'project or ensure the project org matches the compute org, or pass computeId / serviceDriverId / '
+                'computeName via the API.'
+            ),
+        }
+    
+    def resolve_hybrid_org_id(self, project, org_id=None, service_id=None):
+        """
+        Resolve organization ID for HYBRID driver creation.
+
+        Order:
+        1. Explicit ``org_id`` (request / caller)
+        2. ``project.org`` (dict or entity)
+        3. ``project.to_json()`` → ``orgId`` / nested ``org``
+        4. FaaS ``service`` by ``service_id`` or ``_env_service_id_for_hybrid()`` → ``service.org_id``
+        """
+        def _strip(s):
+            if s is None:
+                return None
+            if isinstance(s, str):
+                t = s.strip()
+                return t or None
+            return s
+
+        org_id = _strip(org_id)
+        if org_id:
+            return org_id, 'explicit'
+
+        try:
+            if isinstance(project.org, dict):
+                oid = project.org.get('id')
+                if oid:
+                    return str(oid).strip(), 'project.org'
+            else:
+                oid = getattr(project.org, 'id', None)
+                if oid:
+                    return str(oid).strip(), 'project.org'
+        except Exception as e:
+            logger.debug(f'resolve_hybrid_org_id: project.org: {e}')
+
+        try:
+            if hasattr(project, 'to_json'):
+                j = project.to_json()
+                if isinstance(j, dict):
+                    oid = j.get('orgId')
+                    if oid is None and isinstance(j.get('org'), dict):
+                        oid = j.get('org', {}).get('id')
+                    elif oid is None and j.get('org') and not isinstance(j.get('org'), dict):
+                        oid = j.get('org')
+                    if isinstance(oid, dict):
+                        oid = oid.get('id')
+                    oid = _strip(oid) if oid else None
+                    if oid:
+                        return oid, 'project_json'
+        except Exception as e:
+            logger.debug(f'resolve_hybrid_org_id: project.to_json: {e}')
+
+        sid = _strip(service_id) or _strip(_env_service_id_for_hybrid())
+        if sid:
             try:
-                if hasattr(e, 'response') and getattr(e, 'response', None) is not None:
-                    r = e.response
-                    if hasattr(r, 'json') and callable(getattr(r, 'json')):
-                        body = r.json()
-                        if isinstance(body, dict):
-                            err_msg = body.get('error') or body.get('message') or err_msg
-                    if err_msg == str(e) and hasattr(r, 'text') and r.text:
-                        try:
-                            body = json.loads(r.text)
-                            if isinstance(body, dict):
-                                err_msg = body.get('error') or body.get('message') or err_msg
-                        except Exception:
-                            pass
-                if err_msg == str(e) and getattr(e, 'args', None) and len(e.args) > 0:
-                    first = e.args[0]
-                    if isinstance(first, dict):
-                        err_msg = first.get('error') or first.get('message') or err_msg
-                    elif isinstance(first, str) and first.strip().startswith('{'):
-                        try:
-                            parsed = json.loads(first)
-                            if isinstance(parsed, dict):
-                                err_msg = parsed.get('error') or parsed.get('message') or err_msg
-                        except Exception:
-                            pass
-                # Dataloop SDK embeds API response in exception: [Response <404>][Reason: Not Found][Text: {"message":"...",...}]
-                if err_msg == str(e):
-                    s = str(e)
-                    # Find JSON after "Text: " (may be object or array with one object)
-                    text_prefix = 'Text: '
-                    idx = s.find(text_prefix)
-                    if idx >= 0:
-                        rest = s[idx + len(text_prefix):].strip()
-                        start = rest.find('{')
-                        if start >= 0:
-                            depth = 0
-                            end = -1
-                            for i, c in enumerate(rest[start:], start=start):
-                                if c == '{':
-                                    depth += 1
-                                elif c == '}':
-                                    depth -= 1
-                                    if depth == 0:
-                                        end = i
-                                        break
-                            if end >= 0:
-                                try:
-                                    parsed = json.loads(rest[start:end + 1])
-                                    if isinstance(parsed, dict):
-                                        err_msg = parsed.get('error') or parsed.get('message') or err_msg
-                                    elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
-                                        err_msg = parsed[0].get('error') or parsed[0].get('message') or err_msg
-                                except Exception:
-                                    pass
-                # Fallback: extract "message":"...\" value from exception string (handles nested JSON)
-                if err_msg == str(e):
-                    s = str(e)
-                    key = '"message":"'
-                    idx = s.find(key)
-                    if idx >= 0:
-                        start = idx + len(key)
-                        i = start
-                        end = start
-                        while i < len(s):
-                            if s[i] == '\\' and i + 1 < len(s):
-                                i += 2
-                                continue
-                            if s[i] == '"':
-                                end = i
-                                break
-                            i += 1
-                        if end > start:
-                            extracted = s[start:end].replace('\\"', '"').replace('\\n', '\n').strip()
-                            if extracted:
-                                err_msg = extracted
-                if err_msg == str(e) and str(e).strip().startswith('{'):
-                    try:
-                        parsed = json.loads(str(e))
-                        if isinstance(parsed, dict):
-                            err_msg = parsed.get('error') or parsed.get('message') or err_msg
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            return {
-                'success': False,
-                'error': err_msg,
-                'message': err_msg
-            }
+                svc = project.services.get(service_id=sid)
+                oid = getattr(svc, 'org_id', None)
+                if oid:
+                    logger.info(f'resolve_hybrid_org_id: using org {oid} from service {sid}')
+                    return str(oid).strip(), 'service'
+            except Exception as e:
+                logger.warning(f'resolve_hybrid_org_id: could not load service {sid} for org: {e}')
+
+        return None, None
     
     def create_hybrid_storage_driver(self, project_id: str = None, driver_name: str = None,
                                      compute_id: str = None, compute_storage_name: str = None,
-                                     org_id: str = None, path: str = None) -> dict:
+                                     org_id: str = None, path: str = None,
+                                     service_driver_id: str = None, service_id: str = None,
+                                     compute_name: str = None) -> dict:
         """
         Create a HYBRID external storage driver (compute storage backed).
         """
@@ -2860,45 +3277,133 @@ class StressTestServer(dl.BaseServiceRunner):
             if project_id is None:
                 project_id = self.project_id
             project = dl.projects.get(project_id=project_id)
-            if not driver_name or not compute_id or not compute_storage_name:
-                return {'success': False, 'error': 'driver_name, compute_id, and compute_storage_name are required'}
-            if org_id is None:
-                if isinstance(project.org, dict):
-                    org_id = project.org.get('id')
-                else:
-                    org_id = getattr(project.org, 'id', None)
+            resolved = self.resolve_hybrid_compute_id(
+                project_id=project_id,
+                compute_id=compute_id,
+                service_driver_id=service_driver_id,
+                service_id=service_id,
+                compute_name=compute_name,
+            )
+            if not resolved.get('success'):
+                return {'success': False, 'error': resolved.get('error', 'Could not resolve compute_id')}
+            compute_id = resolved['compute_id']
+            resolution = resolved.get('resolution')
+            logger.info(f'HYBRID compute_id resolved via {resolution}: {compute_id}')
+            if not driver_name or not compute_storage_name:
+                return {'success': False, 'error': 'driver_name and compute_storage_name are required'}
+            effective_service_id = resolved.get('service_id_used') or service_id or _env_service_id_for_hybrid()
+            org_id, org_resolution = self.resolve_hybrid_org_id(
+                project,
+                org_id=org_id,
+                service_id=effective_service_id,
+            )
             if not org_id:
-                return {'success': False, 'error': 'Could not determine organization ID; pass orgId'}
+                return {'success': False, 'error': 'Could not determine organization ID; pass orgId or ensure project has org, or set SERVICE_ID / STRESS_TEST_SERVICE_ID so org can be read from that service'}
+            if org_resolution:
+                logger.info(f'HYBRID org_id resolved via {org_resolution}: {org_id}')
             if path is None or (isinstance(path, str) and not path.strip()):
                 path = DEFAULT_STORAGE_BASE_PATH  # stress-test folder on compute storage, e.g. /s/.../stress-test
             elif isinstance(path, str):
                 path = path.strip()
-            # Prefer SDK enum when available (newer dtlpy); else string for API compatibility
-            hybrid_type = getattr(dl.ExternalStorage, 'HYBRID', 'hybrid')
-            driver = project.drivers.create(
-                name=driver_name,
-                driver_type=hybrid_type,
-                compute_id=compute_id,
-                compute_storage_name=compute_storage_name,
-                org_id=org_id,
-                path=path,
-            )
+            existing_hybrid = self.list_hybrid_drivers(project_id=project_id)
+            if existing_hybrid.get('success'):
+                for d in existing_hybrid.get('drivers', []):
+                    if d.get('name') == driver_name:
+                        return {
+                            'success': True,
+                            'driver': d,
+                            'exists': True,
+                            'message': 'Driver already exists',
+                            'compute_resolution': resolution,
+                            'org_resolution': org_resolution,
+                        }
+            # HYBRID: GET /drivers/{id} returns flat fields (computeId, computeStorageName, path). Create must use
+            # that shape for ``path`` to persist; nested-only SDK payloads are accepted but may drop path.
+            def _creator_email():
+                try:
+                    info = dl.client_api.info()
+                    if isinstance(info, dict) and info.get('user_email'):
+                        return info['user_email']
+                except Exception:
+                    pass
+                return None
+
+            flat_payload = {
+                'name': driver_name,
+                'type': 'hybrid',
+                'metadata': {'system': {'projectId': project_id}},
+                'computeId': compute_id,
+                'computeStorageName': compute_storage_name,
+                'public': False,
+                'allowExternalDelete': True,
+            }
+            if org_id is not None:
+                flat_payload['metadata']['system']['orgId'] = org_id
+            if path:
+                flat_payload['path'] = path
+            ce = _creator_email()
+            if ce:
+                flat_payload['creator'] = ce
+
+            nested_payload = {
+                'name': driver_name,
+                'metadata': {'system': {'projectId': project_id}},
+                'type': 'hybrid',
+                'payload': {
+                    'computeId': compute_id,
+                    'computeStorageName': compute_storage_name,
+                    'public': False,
+                },
+                'allowExternalDelete': True,
+            }
+            if org_id is not None:
+                nested_payload['metadata']['system']['orgId'] = org_id
+            if path:
+                nested_payload['path'] = path
+                nested_payload['payload']['path'] = path
+            if ce:
+                nested_payload['creator'] = ce
+
+            driver = None
+            try:
+                driver = project.drivers._create_driver(flat_payload)
+            except Exception as e:
+                logger.warning(
+                    'HYBRID flat create failed (%s); retrying with nested payload (SDK shape)',
+                    e,
+                )
+                driver = project.drivers._create_driver(nested_payload)
+
+            if path and not _path_from_driver_entity(driver):
+                if _patch_hybrid_driver_path(str(driver.id), path):
+                    try:
+                        driver = project.drivers.get(driver_id=str(driver.id))
+                    except Exception as re_err:
+                        logger.warning(f'Could not reload driver after path PATCH: {re_err}')
+
+            resolved_path = _path_from_driver_entity(driver) or path
             return {
                 'success': True,
                 'driver': {
                     'id': driver.id,
                     'name': getattr(driver, 'name', None) or driver_name,
                     'type': 'hybrid',
+                    'path': resolved_path,
+                    'compute_id': getattr(driver, 'compute_id', None) or compute_id,
+                    'compute_storage_name': getattr(driver, 'compute_storage_name', None) or compute_storage_name,
                 },
                 'exists': False,
                 'message': 'HYBRID driver created successfully',
+                'compute_resolution': resolution,
+                'org_resolution': org_resolution,
             }
         except Exception as e:
             logger.error(f"Error creating HYBRID driver: {e}", exc_info=True)
             return {'success': False, 'error': str(e), 'message': str(e)}
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None,
-                        create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None, workflow_id: str = None) -> dict:
+                        create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None, workflow_id: str = None,
+                        storage_path_override: str = None) -> dict:
         """
         Download images from COCO to NFS storage.
         
@@ -2912,6 +3417,7 @@ class StressTestServer(dl.BaseServiceRunner):
             link_base_url: Required when create_link_on_download=True; base URL for link items.
             project_id: Required when create_link_on_download=True for dataset access.
             workflow_id: If set, download stops when workflow is cancelled (status 'cancelling'); no new link items are created after cancel.
+            storage_path_override: If set, write files to this absolute path (used for HYBRID driver.path alignment).
         
         Returns:
             dict with download results
@@ -2934,11 +3440,16 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
         total_images = len(image_urls)
-        # Use storage path from Link Base URL when provided (no date dir: reuse existing downloads)
-        link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
-        storage_path = _storage_path_from_link_base_url(link_base_for_storage) if link_base_for_storage else None
-        if storage_path is None:
-            storage_path = self.storage_path
+        # Prefer explicit override (e.g. HYBRID driver.path from run_full_stress_test); else Link Base URL; else default
+        if storage_path_override and str(storage_path_override).strip():
+            storage_path = str(storage_path_override).strip()
+            if not storage_path.startswith('/'):
+                storage_path = '/' + storage_path.lstrip('/')
+        else:
+            link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
+            storage_path = _storage_path_from_link_base_url(link_base_for_storage) if link_base_for_storage else None
+            if storage_path is None:
+                storage_path = self.storage_path
         logger.info(f"Starting download of {total_images} images to {storage_path}")
         # Resolve link_base_url for workers (each process will get dataset by id; no shared memory)
         link_base_url_full = None
@@ -4979,7 +5490,7 @@ class ServiceRunner:
                              skip_execute: bool = False,
                              link_base_url: str = None,
                              progress_callback=None,
-                             hybrid_storage: bool = False) -> dict:
+                             hybrid_storage: bool = True) -> dict:
         """
         Run the full stress test flow:
         0. (Optional) Create dataset if it doesn't exist
@@ -5003,8 +5514,8 @@ class ServiceRunner:
             skip_link_items: Skip link item creation (also auto-skipped if dataset has items)
             skip_pipeline: Skip pipeline creation
             skip_execute: Skip pipeline execution
-            link_base_url: Base URL for link items (overrides instance default)
-            hybrid_storage: HYBRID driver flow — no per-file link items; sync dataset after create and after download phase
+            link_base_url: Fallback for download directory when HYBRID driver path is unavailable; also used for non-HYBRID link items (overrides instance default)
+            hybrid_storage: HYBRID driver flow — no per-file link items; sync dataset after create and after download phase (default: True)
             stream_image_concurrency: Code node (stream-image) concurrency (default: pipeline_concurrency)
             stream_image_max_replicas: Code node max replicas (default: pipeline_max_replicas)
             resnet_concurrency: ResNet node concurrency (default: pipeline_concurrency)
@@ -5019,13 +5530,26 @@ class ServiceRunner:
         _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else 10
         _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
 
-        # Use storage path from Link Base URL when provided (no date: reuse existing downloads)
-        effective_storage_path = _storage_path_from_link_base_url(link_base_url) if link_base_url else None
+        # HYBRID: prefer the driver's path (dataset root on compute storage). Else Link Base URL → path; else server default.
+        effective_storage_path = None
+        storage_path_source = None
+        if hybrid_storage and driver_id and project_id:
+            dp = _fetch_hybrid_driver_storage_path(driver_id, project_id)
+            if dp:
+                effective_storage_path = dp
+                storage_path_source = 'hybrid_driver_path'
+                logger.info(f'Using HYBRID driver storage path (dataset root): {effective_storage_path}')
+        if effective_storage_path is None and link_base_url:
+            effective_storage_path = _storage_path_from_link_base_url(link_base_url)
+            if effective_storage_path:
+                storage_path_source = 'link_base_url'
         if effective_storage_path is None:
             effective_storage_path = self.storage_path
+            storage_path_source = storage_path_source or 'server_default'
         results = {
             'date': self.date_str,
             'storage_path': effective_storage_path,
+            'storage_path_source': storage_path_source,
             'max_images': max_images,
             'steps': [],
             'hybrid_storage': hybrid_storage,
@@ -5242,7 +5766,8 @@ class ServiceRunner:
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
                     dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
-                    workflow_id=getattr(self, '_current_workflow_id', None)
+                    workflow_id=getattr(self, '_current_workflow_id', None),
+                    storage_path_override=effective_storage_path,
                 )
             else:
                 # Normal download
@@ -5256,7 +5781,8 @@ class ServiceRunner:
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
                     create_link_on_download=do_link_on_download,
                     dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
-                    workflow_id=getattr(self, '_current_workflow_id', None)
+                    workflow_id=getattr(self, '_current_workflow_id', None),
+                    storage_path_override=effective_storage_path,
                 )
             
             results['steps'].append({

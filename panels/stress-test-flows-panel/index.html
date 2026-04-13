@@ -90,46 +90,6 @@
             line-height: 1.6;
         }
 
-        .env-banner {
-            background: var(--bg-card);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 24px 32px;
-            margin-bottom: 40px;
-            box-shadow: var(--shadow-sm);
-        }
-
-        .env-banner h3 {
-            font-size: 14px;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            margin-bottom: 16px;
-        }
-
-        .env-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 20px;
-        }
-
-        .env-item {
-            text-align: center;
-        }
-
-        .env-label {
-            font-size: 12px;
-            color: var(--text-muted);
-            margin-bottom: 4px;
-        }
-
-        .env-value {
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 14px;
-            font-weight: 600;
-            color: var(--accent-primary);
-        }
-
         .flow-nav {
             display: flex;
             justify-content: center;
@@ -351,42 +311,11 @@
             <p class="subtitle">End-to-end process flows for stress testing nginx gateway on Cloud FaaS with ResNet pipeline execution</p>
         </header>
 
-        <div class="env-banner">
-            <h3>Environment Configuration</h3>
-            <div class="env-grid">
-                <div class="env-item">
-                    <div class="env-label">Cloud Provider</div>
-                    <div class="env-value">Cloud</div>
-                </div>
-                <div class="env-item">
-                    <div class="env-label">Storage</div>
-                    <div class="env-value">Storage</div>
-                </div>
-                <div class="env-item">
-                    <div class="env-label">Rubiks Version</div>
-                    <div class="env-value">v1.41.1-rc.18</div>
-                </div>
-                <div class="env-item">
-                    <div class="env-label">Piper Version</div>
-                    <div class="env-value">sprint40</div>
-                </div>
-                <div class="env-item">
-                    <div class="env-label">Serve-Agent</div>
-                    <div class="env-value">1.1.1-obf.0</div>
-                </div>
-                <div class="env-item">
-                    <div class="env-label">Scaler Version</div>
-                    <div class="env-value">1.101.0-rc.4-prom-scale-2-nginx</div>
-                </div>
-            </div>
-        </div>
-
         <nav class="flow-nav">
             <a href="index.html" class="nav-pill active">Overview</a>
             <a href="step1-compute-setup.html" class="nav-pill">Compute Setup</a>
             <a href="step2-project.html" class="nav-pill">Project & Dataset</a>
             <a href="step3-download-images.html" class="nav-pill">Download Images</a>
-            <a href="step4-link-items.html" class="nav-pill">Link Items</a>
             <a href="step5-pipeline.html" class="nav-pill">Pipeline</a>
             <a href="step6-execute.html" class="nav-pill">Execute</a>
         </nav>
@@ -412,13 +341,6 @@
                     <div class="step-box">
                         <span class="step-icon">⬇️</span>
                         <span class="step-label">Download Images</span>
-                    </div>
-                </div>
-                <span class="flow-arrow">→</span>
-                <div class="flow-step">
-                    <div class="step-box">
-                        <span class="step-icon">🔗</span>
-                        <span class="step-label">Create Link Items</span>
                     </div>
                 </div>
                 <span class="flow-arrow">→</span>
@@ -463,7 +385,7 @@
                         <span class="flow-subtitle">Create in Organization</span>
                     </div>
                 </div>
-                <p class="flow-description">Create a project in the org and set up the faasProxy dataset for storing link items.</p>
+                <p class="flow-description">Create a HYBRID (compute storage) driver for datasets and the stress-test workflow.</p>
                 <div class="flow-tags">
                     <span class="tag sdk">dtlpy SDK</span>
                     <span class="tag">Project</span>
@@ -487,25 +409,9 @@
                 </div>
             </a>
 
-            <a href="step4-link-items.html" class="flow-card">
-                <div class="flow-card-header">
-                    <div class="flow-number">4</div>
-                    <div>
-                        <h3 class="flow-title">Create Link Items</h3>
-                        <span class="flow-subtitle">faasProxy Dataset</span>
-                    </div>
-                </div>
-                <p class="flow-description">Create link items in the faasProxy dataset for each downloaded image in Storage.</p>
-                <div class="flow-tags">
-                    <span class="tag sdk">dtlpy SDK</span>
-                    <span class="tag">LinkItem</span>
-                    <span class="tag">faasProxy</span>
-                </div>
-            </a>
-
             <a href="step5-pipeline.html" class="flow-card">
                 <div class="flow-card-header">
-                    <div class="flow-number">5</div>
+                    <div class="flow-number">4</div>
                     <div>
                         <h3 class="flow-title">Create Pipeline</h3>
                         <span class="flow-subtitle">ResNet Function Integration</span>
@@ -521,7 +427,7 @@
 
             <a href="step6-execute.html" class="flow-card">
                 <div class="flow-card-header">
-                    <div class="flow-number">6</div>
+                    <div class="flow-number">5</div>
                     <div>
                         <h3 class="flow-title">Execute Pipeline Cycles</h3>
                         <span class="flow-subtitle">Run on Entire Dataset</span>

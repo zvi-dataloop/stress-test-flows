@@ -35,12 +35,10 @@
         .info-box p { font-size: 13px; color: var(--text-secondary); margin-bottom: 8px; }
         .info-box p:last-child { margin-bottom: 0; }
         .info-box strong { color: var(--accent-primary); }
-        .info-box a { color: var(--accent-primary); text-decoration: none; }
-        .info-box a:hover { text-decoration: underline; }
 
         .form-group { margin-bottom: 20px; }
         .form-group label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary); }
-        .form-group input, .form-group select { width: 100%; padding: 10px 14px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; }
+        .form-group input, .form-group select { width: 100%; padding: 10px 14px; border: 1px solid var(--border-color); border-radius: 8px; font-size: 14px; font-family: inherit; background: var(--bg-card); }
         .form-group input:focus, .form-group select:focus { outline: none; border-color: var(--accent-primary); }
         .form-group small { display: block; margin-top: 6px; font-size: 12px; color: var(--text-muted); }
 
@@ -82,7 +80,7 @@
             <div class="step-badge">2</div>
             <div class="page-title">
                 <h1>Project & Dataset</h1>
-                <p>Create faasProxy storage driver for your project</p>
+                <p>Create a HYBRID storage driver (compute storage) for datasets and the stress-test workflow</p>
             </div>
         </div>
         <nav class="flow-nav">
@@ -90,154 +88,74 @@
             <a href="step1-compute-setup.html" class="nav-pill">Compute Setup</a>
             <a href="step2-project.html" class="nav-pill active">Project & Dataset</a>
             <a href="step3-download-images.html" class="nav-pill">Download Images</a>
-            <a href="step4-link-items.html" class="nav-pill">Link Items</a>
             <a href="step5-pipeline.html" class="nav-pill">Pipeline</a>
             <a href="step6-execute.html" class="nav-pill">Execute</a>
         </nav>
 
         <div class="card">
-            <h2>faasProxy Storage Driver</h2>
+            <h2>HYBRID storage driver (compute)</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                The faasProxy driver is built as a layer above the GCS driver and is needed to store JSON files. 
-                It allows datasets to reference files stored in FaaS Storage without copying them (using link items).
+                HYBRID drivers bind your project to <strong>compute cluster storage</strong> (NFS path on the FaaS compute volume).
+                The stress test uses <code>hybridStorage</code> (default): downloads go to that path and <code>dataset.sync()</code> indexes files—no per-file link items.
             </p>
             <div class="info-box">
-                <p><strong>Prerequisites:</strong></p>
-                <p>• You need a GCS integration or Cloud Workload Identity Federation integration in your organization</p>
-                <p>• Supported integration types: <code>gcs</code>, <code>gcp-workload-identity-federation</code></p>
-                <p>• See Dataloop documentation: <a href="https://developers.dataloop.ai/tutorials/data_management/external_storage_drivers/gcs/chapter" target="_blank">GCS Integration Guide</a></p>
-                <p>• <a href="https://docs.dataloop.ai/docs/cross-project-integration" target="_blank">Cross-Project Integration</a> (recommended), <a href="https://docs.dataloop.ai/docs/private-key-integration" target="_blank">Private Key Integration</a>, or <a href="https://docs.dataloop.ai/docs/workload-identity-federation" target="_blank">Workload Identity Federation</a></p>
+                <p><strong>What you need:</strong></p>
+                <p>• <strong>Driver name</strong> — required.</p>
+                <p>• <strong>Compute storage</strong> — loaded from the compute cluster <strong>storage-driver</strong> (or dataset) plugin, same as in the compute UI. If there is only one storage, it is chosen automatically; if there are several, pick one from the dropdown.</p>
+                <p>• <strong>Path on storage</strong> — optional folder on that storage; if empty, the service default path is used.</p>
+                <p>• <strong>Link Base URL</strong> belongs on the <strong>Execute</strong> step: it tells the workflow the serve-agent / gateway URL plus path inside storage so downloads land under the right directory. You do not set it on this page.</p>
             </div>
-        </div>
-
-        <div id="orgAccessChecking" class="card" style="text-align: center; padding: 32px;">
-            <div class="loading" style="margin: 0 auto 16px;"></div>
-            <p style="color: var(--text-secondary);">Checking organization access...</p>
-        </div>
-
-        <div id="noOrgPermissionSection" class="card" style="display: none;">
-            <h2>Organization permission required</h2>
-            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                This service runs as a user or bot that does not have organization-level permission. 
-                To create integrations and drivers from this UI, add the service identity to your organization with the required permissions.
-            </p>
-            <div class="info-box" style="background: rgba(245, 158, 11, 0.1); border-color: var(--accent-warning);">
-                <p><strong>Organization</strong></p>
-                <p id="noPermOrgName" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; margin-top: 8px;">—</p>
-                <p id="noPermOrgId" style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">—</p>
-                <p style="margin-top: 12px;"><strong>Service bot (add this to your org):</strong></p>
-                <p id="noPermBotUserName" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; margin-top: 4px; font-weight: 600;">—</p>
-                <p id="noPermIdentityFallback" style="font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--text-muted); margin-top: 4px; display: none;">—</p>
-                <p style="margin-top: 16px;">Add the service bot above to the organization with permissions to create integrations and storage drivers. The bot must be set as <strong>admin</strong> on the org in order to get the permission to create the driver. <a id="orgMembersLink" href="#" target="_blank" rel="noopener noreferrer">Open org members</a> to add it. Then refresh this page.</p>
-            </div>
-            <div class="info-box" style="margin-top: 16px; background: rgba(16, 185, 129, 0.08); border-color: var(--accent-success);">
-                <p><strong>Alternative: run the script locally</strong></p>
-                <p>If you cannot grant org permission to the service, clone the project and run the script on your machine (with your own credentials):</p>
-                <p style="font-family: 'JetBrains Mono', monospace; font-size: 12px; background: var(--bg-tertiary); padding: 10px; border-radius: 4px; margin-top: 8px; white-space: pre-wrap;"># Check existing drivers
-python check_faas_proxy_drivers.py --project-name "your-project"
-
-# Create a new driver (interactive)
-python create_faas_proxy_driver.py</p>
-                <p style="margin-top: 8px;">Scripts on GitHub: <a href="https://github.com/zvi-dataloop/stress-test-flows/blob/main/create_faas_proxy_driver.py" target="_blank" rel="noopener noreferrer">create_faas_proxy_driver.py</a>, <a href="https://github.com/zvi-dataloop/stress-test-flows/blob/main/check_faas_proxy_drivers.py" target="_blank" rel="noopener noreferrer">check_faas_proxy_drivers.py</a></p>
-            </div>
-        </div>
-
-        <div id="driverSection" style="display: none;">
-        <div class="card">
-            <h2>Check Existing Drivers</h2>
-            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Check if a faasProxy driver already exists in your project.
-            </p>
-            <button type="button" class="btn btn-secondary" onclick="loadDrivers()">🔄 Refresh Drivers List</button>
-            <div id="driversList" style="margin-top: 16px;"></div>
         </div>
 
         <div class="card">
-            <h2>Create faasProxy Driver</h2>
+            <h2>Check existing HYBRID drivers</h2>
+            <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
+                Shows drivers whose <strong>project id</strong> on the record matches this panel’s project, and whose <strong>compute</strong> matches this service (same as storages). Drivers without a project id in the API are hidden unless you set <code>HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1</code>. For all HYBRID drivers in the project (all computes), set <code>HYBRID_DRIVERS_PROJECT_WIDE=1</code>.
+            </p>
+            <button type="button" class="btn btn-secondary" onclick="loadHybridDrivers()">🔄 Refresh HYBRID drivers</button>
+            <div id="hybridDriversList" style="margin-top: 16px;"></div>
+        </div>
+
+        <div class="card">
+            <h2>Create HYBRID driver</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 20px;">
-                Create a new faasProxy storage driver. You can use an existing GCS integration or create a new one.
+                Creates a HYBRID external storage driver via the service API.
             </p>
-            
-            <div style="margin-bottom: 20px;">
-                <label style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px; cursor: pointer;">
-                    <input type="radio" name="integrationMode" value="select" checked onchange="toggleIntegrationMode()" style="width: auto;">
-                    <span>Select from list (if available)</span>
-                </label>
-                <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                    <input type="radio" name="integrationMode" value="manual" onchange="toggleIntegrationMode()" style="width: auto;">
-                    <span>Enter Integration ID manually</span>
-                </label>
-            </div>
 
-            <div id="integrationSelectMode" style="margin-bottom: 20px;">
-                <button type="button" class="btn btn-secondary" onclick="loadIntegrations()" style="margin-bottom: 16px;">🔄 Load GCS Integrations</button>
-                <div id="integrationsList" style="margin-bottom: 20px;"></div>
-            </div>
+            <div id="hybridStatusMessage"></div>
 
-            <div id="integrationManualMode" style="display: none; margin-bottom: 20px;">
-                <div class="info-box">
-                    <p><strong>Note:</strong> FaaS services don't have access to read organization-level integrations.</p>
-                    <p>If you know your GCS integration ID, enter it manually below.</p>
-                </div>
-            </div>
-
-            <div id="statusMessage"></div>
-
-            <form id="driverForm" novalidate>
+            <form id="hybridDriverForm" novalidate>
                 <div class="form-group">
-                    <label for="driverName">Driver Name *</label>
-                    <input type="text" id="driverName" required placeholder="e.g., faas-proxy-driver">
+                    <label for="hybridDriverName">Driver name *</label>
+                    <input type="text" id="hybridDriverName" required placeholder="e.g., stress-hybrid-compute">
                 </div>
-
-                <div class="form-group" id="integrationSelectGroup">
-                    <label for="integrationId">GCS Integration *</label>
-                    <select id="integrationId">
-                        <option value="">Select an integration...</option>
-                    </select>
-                    <small>Select an existing GCS integration from the list above</small>
+                <input type="hidden" id="hybridComputeStorageName" value="">
+                <div class="form-group" id="hybridStorageLoadingGroup">
+                    <label>Compute storage</label>
+                    <div id="hybridStorageLoading" class="status-message info" style="margin-bottom:0;">Loading storages from compute (storage-driver plugin)…</div>
                 </div>
-
-                <div id="integrationManualGroup" style="display: none;">
-                    <div class="form-group">
-                        <label for="integrationTypeManual">Integration Type *</label>
-                        <select id="integrationTypeManual" required>
-                            <option value="">Select integration type...</option>
-                            <option value="gcs">gcs</option>
-                            <option value="gcp-workload-identity-federation">gcp-workload-identity-federation</option>
-                        </select>
-                        <small>Select the type of GCS integration you're using</small>
-                    </div>
-                    <div class="form-group">
-                        <label for="integrationIdManual">GCS Integration ID *</label>
-                        <input type="text" id="integrationIdManual" placeholder="e.g., ed2536b0-78de-4eb0-b79b-dc0cb864823b">
-                        <small>Enter your GCS integration ID (you can find it in the Dataloop platform or by running the script locally)</small>
-                    </div>
+                <div class="form-group" id="hybridStorageSelectGroup" style="display: none;" data-storage-mode="">
+                    <label for="hybridStorageSelect">Compute storage *</label>
+                    <select id="hybridStorageSelect" aria-label="Compute storage"></select>
+                    <small>Multiple storages are configured on this compute — choose which one to bind.</small>
                 </div>
-
+                <div class="form-group" id="hybridStorageAutoGroup" style="display: none;">
+                    <label>Compute storage</label>
+                    <div id="hybridStorageAutoText" class="status-message info" style="margin-bottom:0;"></div>
+                </div>
+                <div class="form-group" id="hybridStorageErrorGroup" style="display: none;">
+                    <div id="hybridStorageError" class="status-message error"></div>
+                </div>
                 <div class="form-group">
-                    <label for="bucketName">GCS Bucket Name *</label>
-                    <input type="text" id="bucketName" required placeholder="e.g., my-gcs-bucket">
+                    <label for="hybridPath">Path on storage (optional)</label>
+                    <input type="text" id="hybridPath" placeholder="e.g., /s/pd_datfs2/stress-test">
+                    <small>Folder on compute storage. If empty, the service default path is used.</small>
                 </div>
 
-                <div class="form-group">
-                    <label for="path">Path (Optional)</label>
-                    <input type="text" id="path" placeholder="e.g., folder/subfolder (leave empty for root)">
-                    <small>Optional path within the bucket</small>
-                </div>
-
-                <div class="form-group">
-                    <label>
-                        <input type="checkbox" id="allowExternalDelete" checked style="width: auto; margin-right: 8px;">
-                        Allow External Delete
-                    </label>
-                    <small>Allow deleting items from storage through Dataloop platform</small>
-                </div>
-
-                <button type="button" class="btn btn-primary" id="createBtn">🚀 Create faasProxy Driver</button>
+                <button type="button" class="btn btn-primary" id="hybridCreateBtn" disabled>🚀 Create HYBRID driver</button>
             </form>
 
-            <div id="driverResult" style="margin-top: 20px;"></div>
-        </div>
+            <div id="hybridDriverResult" style="margin-top: 20px;"></div>
         </div>
 
         <div class="nav-buttons">
@@ -247,108 +165,237 @@ python create_faas_proxy_driver.py</p>
     </div>
 
     <script>
-        let integrations = [];
-        let drivers = [];
-
-        async function loadIntegrations() {
-            const listDiv = document.getElementById('integrationsList');
-            listDiv.innerHTML = '<div class="loading"></div> Loading integrations...';
-            
-            try {
-                const response = await fetch('/api/gcs-integrations');
-                const data = await response.json();
-                
-                if (data.success && data.integrations.length > 0) {
-                    integrations = data.integrations;
-                    let html = '<h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary);">Available GCS Integrations:</h3>';
-                    data.integrations.forEach(int => {
-                        html += `
-                            <div class="list-item">
-                                <div>
-                                    <div class="list-item-name">${int.name}</div>
-                                    <div class="list-item-id">ID: ${int.id}</div>
-                                </div>
-                            </div>
-                        `;
-                    });
-                    listDiv.innerHTML = html;
-                    
-                    // Populate select dropdown
-                    const select = document.getElementById('integrationId');
-                    select.innerHTML = '<option value="">Select an integration...</option>';
-                    data.integrations.forEach(int => {
-                        const option = document.createElement('option');
-                        option.value = int.id;
-                        option.textContent = `${int.name} (${int.id.substring(0, 8)}...)`;
-                        select.appendChild(option);
-                    });
-                } else {
-                    listDiv.innerHTML = '<div class="status-message info">No GCS integrations found. Please create one first. See documentation links above.</div>';
-                }
-            } catch (error) {
-                listDiv.innerHTML = `<div class="status-message error">Error loading integrations: ${error.message}</div>`;
-            }
+        function escHtml(s) {
+            if (s == null || s === undefined) return '';
+            return String(s)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
         }
 
-        async function loadDrivers() {
-            const listDiv = document.getElementById('driversList');
-            listDiv.innerHTML = '<div class="loading"></div> Loading drivers...';
-            
+        function hybridDriverField(driver, snake, camel) {
+            var v = driver[snake];
+            if (v != null && v !== '') return v;
+            v = driver[camel];
+            if (v != null && v !== '') return v;
+            return null;
+        }
+
+        async function loadHybridDrivers() {
+            const listDiv = document.getElementById('hybridDriversList');
+            if (!listDiv) return;
+            listDiv.innerHTML = '<div class="loading"></div> Loading HYBRID drivers...';
             try {
-                const response = await fetch('/api/faas-proxy-drivers');
+                const response = await fetch('/api/hybrid-drivers');
                 const data = await response.json();
-                
-                if (data.success && data.drivers.length > 0) {
-                    drivers = data.drivers;
-                    let html = '<h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary);">Existing faasProxy Drivers:</h3>';
+                const projLine = (data.project_id)
+                    ? '<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 8px;">Project ID: <code style="font-family: \'JetBrains Mono\', monospace;">' + escHtml(String(data.project_id)) + '</code></p>'
+                    : '';
+                let scopeLine = '';
+                if (data.project_wide_listing) {
+                    scopeLine = '<p style="font-size: 12px; color: var(--accent-warning); margin-bottom: 12px;">Listing: <strong>all HYBRID drivers in project</strong> (HYBRID_DRIVERS_PROJECT_WIDE).</p>';
+                } else if (data.compute_filter_applied && data.service_compute_id) {
+                    scopeLine = '<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">Service compute (filter): <code style="font-family: \'JetBrains Mono\', monospace;">' + escHtml(String(data.service_compute_id)) + '</code></p>';
+                } else if (data.success && !data.project_wide_listing && !data.compute_filter_applied) {
+                    scopeLine = '<p style="font-size: 12px; color: var(--text-muted); margin-bottom: 12px;">Compute filter not applied (could not resolve service compute).</p>';
+                }
+                if (data.success && data.drivers && data.drivers.length > 0) {
+                    let html = projLine + scopeLine + '<h3 style="font-size: 14px; margin-bottom: 12px; color: var(--text-primary);">HYBRID drivers (' + data.drivers.length + ')</h3>';
                     data.drivers.forEach(driver => {
+                        const rawId = String(driver.id);
+                        const attrId = rawId.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                        const name = escHtml(driver.name);
+                        const path = escHtml(driver.path != null && driver.path !== '' ? driver.path : 'N/A');
+                        const csRaw = hybridDriverField(driver, 'compute_storage_name', 'computeStorageName');
+                        const cidRaw = hybridDriverField(driver, 'compute_id', 'computeId');
+                        const cs = escHtml(csRaw != null ? csRaw : 'N/A');
+                        const cid = escHtml(cidRaw != null ? cidRaw : 'N/A');
                         html += `
                             <div class="list-item">
                                 <div>
-                                    <div class="list-item-name">${driver.name}</div>
-                                    <div class="list-item-id">ID: ${driver.id} | Bucket: ${driver.bucket || 'N/A'}</div>
+                                    <div class="list-item-name">${name}</div>
+                                    <div class="list-item-id">ID: ${escHtml(rawId)} | path: ${path}</div>
+                                    <div class="list-item-id" style="margin-top:4px;">compute: ${cid} | storage: ${cs}</div>
                                 </div>
                                 <div class="list-item-actions">
-                                    <button class="btn btn-small btn-secondary" data-driver-id="${(driver.id + '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" onclick="copyDriverId(this.getAttribute('data-driver-id'))">Copy ID</button>
+                                    <button type="button" class="btn btn-small btn-secondary" data-driver-id="${attrId}" onclick="copyDriverId(this.getAttribute('data-driver-id'))">Copy ID</button>
                                 </div>
                             </div>
                         `;
                     });
                     listDiv.innerHTML = html;
                 } else {
-                    listDiv.innerHTML = '<div class="status-message info">No faasProxy drivers found in this project.</div>';
+                    listDiv.innerHTML = projLine + scopeLine + '<div class="status-message info">No HYBRID drivers match this service compute (or none in project). Create one below or set HYBRID_DRIVERS_PROJECT_WIDE=1 to see all project drivers.</div>';
                 }
             } catch (error) {
-                listDiv.innerHTML = `<div class="status-message error">Error loading drivers: ${error.message}</div>`;
+                listDiv.innerHTML = '<div class="status-message error">Error loading HYBRID drivers: ' + escHtml(error.message) + '</div>';
             }
         }
 
-        function toggleIntegrationMode() {
-            const mode = document.querySelector('input[name="integrationMode"]:checked').value;
-            const selectMode = document.getElementById('integrationSelectMode');
-            const manualMode = document.getElementById('integrationManualMode');
-            const selectGroup = document.getElementById('integrationSelectGroup');
-            const manualGroup = document.getElementById('integrationManualGroup');
-            const selectField = document.getElementById('integrationId');
-            const manualField = document.getElementById('integrationIdManual');
-            const manualTypeField = document.getElementById('integrationTypeManual');
-            
-            if (mode === 'manual') {
-                selectMode.style.display = 'none';
-                manualMode.style.display = 'block';
-                selectGroup.style.display = 'none';
-                manualGroup.style.display = 'block';
-                selectField.removeAttribute('required');
-                manualField.setAttribute('required', 'required');
-                manualTypeField.setAttribute('required', 'required');
-            } else {
-                selectMode.style.display = 'block';
-                manualMode.style.display = 'none';
-                selectGroup.style.display = 'block';
-                manualGroup.style.display = 'none';
-                manualField.removeAttribute('required');
-                manualTypeField.removeAttribute('required');
-                selectField.setAttribute('required', 'required');
+        function getSelectedComputeStorageName() {
+            const sel = document.getElementById('hybridStorageSelect');
+            const hidden = document.getElementById('hybridComputeStorageName');
+            const selG = document.getElementById('hybridStorageSelectGroup');
+            if (selG && selG.getAttribute('data-storage-mode') === 'multi' && sel && (sel.value || '').trim()) {
+                return sel.value.trim();
+            }
+            return (hidden && hidden.value) ? hidden.value.trim() : '';
+        }
+
+        async function loadHybridComputeStorages() {
+            const loadingG = document.getElementById('hybridStorageLoadingGroup');
+            const loadingEl = document.getElementById('hybridStorageLoading');
+            const selG = document.getElementById('hybridStorageSelectGroup');
+            const autoG = document.getElementById('hybridStorageAutoGroup');
+            const autoText = document.getElementById('hybridStorageAutoText');
+            const errG = document.getElementById('hybridStorageErrorGroup');
+            const errEl = document.getElementById('hybridStorageError');
+            const sel = document.getElementById('hybridStorageSelect');
+            const hidden = document.getElementById('hybridComputeStorageName');
+            const createBtn = document.getElementById('hybridCreateBtn');
+            if (!hidden || !createBtn) return;
+
+            if (loadingG) loadingG.style.display = 'block';
+            if (loadingEl) loadingEl.style.display = 'block';
+            if (selG) {
+                selG.style.display = 'none';
+                selG.setAttribute('data-storage-mode', '');
+            }
+            if (autoG) autoG.style.display = 'none';
+            if (errG) errG.style.display = 'none';
+            hidden.value = '';
+            createBtn.disabled = true;
+
+            try {
+                const response = await fetch('/api/hybrid-compute-storages');
+                const data = await response.json();
+                if (!data.success) {
+                    if (loadingG) loadingG.style.display = 'none';
+                    if (errG) errG.style.display = 'block';
+                    if (errEl) errEl.textContent = 'Could not load storages: ' + (data.error || 'Unknown error') + '. If STRESS_TEST_SERVICE_ID points at a service in another project, remove it or fix it. The compute must expose storages under the storage-driver (or dataset) plugin.';
+                    return;
+                }
+                const storages = (data.storages || []).map(function (s) {
+                    if (!s || typeof s !== 'object') return null;
+                    var n = s.name != null ? String(s.name).trim() : '';
+                    if (!n) return null;
+                    var t = s.type != null ? String(s.type).trim() : '';
+                    return { name: n, type: t };
+                }).filter(Boolean);
+                if (loadingG) loadingG.style.display = 'none';
+                if (storages.length === 0) {
+                    if (errG) errG.style.display = 'block';
+                    if (errEl) errEl.textContent = 'No storages found on this compute’s storage-driver plugin. Check the compute configuration in the platform, then refresh.';
+                    return;
+                }
+                if (storages.length === 1) {
+                    hidden.value = storages[0].name;
+                    if (autoG && autoText) {
+                        autoG.style.display = 'block';
+                        var oneStrong = storages[0].type
+                            ? '<strong>' + escHtml(storages[0].name) + '</strong> <span style="color:var(--text-muted);">(' + escHtml(storages[0].type) + ')</span>'
+                            : '<strong>' + escHtml(storages[0].name) + '</strong>';
+                        autoText.innerHTML = 'Using storage ' + oneStrong + ' (only storage on this compute).';
+                    }
+                    createBtn.disabled = false;
+                    return;
+                }
+                if (sel && selG) {
+                    sel.innerHTML = '';
+                    storages.forEach(function (entry) {
+                        const opt = document.createElement('option');
+                        opt.value = entry.name;
+                        opt.textContent = entry.type ? entry.name + ' (' + entry.type + ')' : entry.name;
+                        sel.appendChild(opt);
+                    });
+                    selG.setAttribute('data-storage-mode', 'multi');
+                    selG.style.display = 'block';
+                    hidden.value = (sel.value || '').trim();
+                    sel.onchange = function () {
+                        const h = document.getElementById('hybridComputeStorageName');
+                        if (h && selG.getAttribute('data-storage-mode') === 'multi') {
+                            h.value = (sel.value || '').trim();
+                        }
+                    };
+                    createBtn.disabled = false;
+                }
+            } catch (error) {
+                if (loadingG) loadingG.style.display = 'none';
+                if (errG) errG.style.display = 'block';
+                if (errEl) errEl.textContent = 'Could not load storages: ' + escHtml(error.message);
+            }
+        }
+
+        async function createHybridDriver(event) {
+            if (event && event.preventDefault) event.preventDefault();
+            const createBtn = document.getElementById('hybridCreateBtn');
+            const statusDiv = document.getElementById('hybridStatusMessage');
+            const resultDiv = document.getElementById('hybridDriverResult');
+            if (!createBtn || !statusDiv || !resultDiv) return;
+
+            createBtn.disabled = true;
+            createBtn.innerHTML = '<span class="loading"></span> Creating...';
+            statusDiv.innerHTML = '';
+            resultDiv.innerHTML = '';
+
+            const driverName = document.getElementById('hybridDriverName').value.trim();
+            let computeStorageName = getSelectedComputeStorageName();
+            const pathVal = document.getElementById('hybridPath').value.trim();
+
+            if (!driverName || !computeStorageName) {
+                statusDiv.innerHTML = '<div class="status-message error">✗ Driver name and compute storage are required (wait for storages to load, or select a storage if several are listed).</div>';
+                createBtn.disabled = false;
+                createBtn.innerHTML = '🚀 Create HYBRID driver';
+                return;
+            }
+
+            const formData = {
+                driverName: driverName,
+                computeStorageName: computeStorageName
+            };
+            if (pathVal) formData.path = pathVal;
+
+            try {
+                const response = await fetch('/api/create-hybrid-driver', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                const data = await response.json();
+                if (data.success) {
+                    statusDiv.innerHTML = '<div class="status-message success">✓ ' + (data.exists ? 'Driver already exists' : 'HYBRID driver created successfully') + '!</div>';
+                    const d = data.driver || {};
+                    const did = escHtml(d.id);
+                    const dname = escHtml(d.name);
+                    const dpath = escHtml(d.path != null ? d.path : '');
+                    const rawId = String(d.id || '');
+                    const attrId = rawId.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                    var resLine = '';
+                    if (data.compute_resolution) {
+                        resLine += '<p><strong>Compute resolved:</strong> ' + escHtml(data.compute_resolution) + '</p>';
+                    }
+                    if (data.org_resolution) {
+                        resLine += '<p><strong>Organization resolved:</strong> ' + escHtml(data.org_resolution) + '</p>';
+                    }
+                    resultDiv.innerHTML =
+                        '<div class="info-box">' +
+                        '<p><strong>Driver ID:</strong> <code style="font-family: \'JetBrains Mono\', monospace; background: var(--bg-tertiary); padding: 4px 8px; border-radius: 4px;">' + did + '</code></p>' +
+                        '<p><strong>Driver name:</strong> ' + dname + '</p>' +
+                        '<p><strong>Path:</strong> ' + (dpath || '—') + '</p>' +
+                        resLine +
+                        '<p style="margin-top: 12px;">Use this Driver ID for <code>driverId</code> in the stress-test workflow.</p>' +
+                        '<button type="button" class="btn btn-small btn-primary" data-driver-id="' + attrId + '" onclick="copyDriverId(this.getAttribute(\'data-driver-id\'))" style="margin-top: 8px;">Copy Driver ID</button>' +
+                        '</div>';
+                    loadHybridDrivers();
+                } else {
+                    statusDiv.innerHTML = '<div class="status-message error">✗ Error: ' + escHtml(data.error || data.message || 'Unknown error') + '</div>';
+                }
+            } catch (error) {
+                statusDiv.innerHTML = '<div class="status-message error">✗ Error: ' + escHtml(error.message) + '</div>';
+            } finally {
+                createBtn.disabled = false;
+                createBtn.innerHTML = '🚀 Create HYBRID driver';
             }
         }
 
@@ -365,9 +412,7 @@ python create_faas_proxy_driver.py</p>
             toast.classList.toggle('error', !!isError);
             toast.classList.add('show');
             clearTimeout(showCopyToast._tid);
-            showCopyToast._tid = setTimeout(() => {
-                toast.classList.remove('show');
-            }, 2500);
+            showCopyToast._tid = setTimeout(() => { toast.classList.remove('show'); }, 2500);
         }
 
         function showCopyToastWithId(message, driverId) {
@@ -409,202 +454,41 @@ python create_faas_proxy_driver.py</p>
                 ta.style.position = 'fixed';
                 ta.style.left = '0';
                 ta.style.top = '0';
-                ta.style.width = '2em';
-                ta.style.height = '2em';
-                ta.style.padding = '0';
-                ta.style.border = 'none';
-                ta.style.outline = 'none';
-                ta.style.boxShadow = 'none';
-                ta.style.background = 'transparent';
                 ta.style.opacity = '0';
-                ta.setAttribute('aria-hidden', 'true');
                 document.body.appendChild(ta);
                 ta.focus();
                 ta.select();
-                ta.setSelectionRange(0, driverId.length);
                 let ok = false;
-                try {
-                    ok = document.execCommand('copy');
-                } finally {
-                    document.body.removeChild(ta);
-                }
+                try { ok = document.execCommand('copy'); } finally { document.body.removeChild(ta); }
                 return ok;
             };
             copy()
                 .then(done => {
-                    if (done) {
-                        showCopyToast('Driver ID copied to clipboard');
-                        return;
-                    }
-                    if (copyFallback()) {
-                        showCopyToast('Driver ID copied to clipboard');
-                    } else {
-                        showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
-                    }
+                    if (done) { showCopyToast('Driver ID copied to clipboard'); return; }
+                    if (copyFallback()) showCopyToast('Driver ID copied to clipboard');
+                    else showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
                 })
                 .catch(() => {
-                    if (copyFallback()) {
-                        showCopyToast('Driver ID copied to clipboard');
-                    } else {
-                        showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
-                    }
+                    if (copyFallback()) showCopyToast('Driver ID copied to clipboard');
+                    else showCopyToastWithId('Could not copy to clipboard. Select and copy:', driverId);
                 });
         }
 
-        async function createDriver(event) {
-            if (event && event.preventDefault) event.preventDefault();
-            
-            const createBtn = document.getElementById('createBtn');
-            const statusDiv = document.getElementById('statusMessage');
-            const resultDiv = document.getElementById('driverResult');
-            
-            createBtn.disabled = true;
-            createBtn.innerHTML = '<span class="loading"></span> Creating...';
-            statusDiv.innerHTML = '';
-            resultDiv.innerHTML = '';
-            
-            // Get integration ID and type based on selected mode
-            const mode = document.querySelector('input[name="integrationMode"]:checked').value;
-            let integrationId, integrationType;
-            
-            if (mode === 'manual') {
-                integrationId = document.getElementById('integrationIdManual').value.trim();
-                integrationType = document.getElementById('integrationTypeManual').value;
-                
-                if (!integrationId || !integrationType) {
-                    statusDiv.innerHTML = '<div class="status-message error">✗ Please provide both Integration Type and Integration ID</div>';
-                    createBtn.disabled = false;
-                    createBtn.innerHTML = '🚀 Create faasProxy Driver';
-                    return;
-                }
-            } else {
-                integrationId = document.getElementById('integrationId').value;
-                integrationType = null; // Will be determined from the selected integration
-                
-                if (!integrationId) {
-                    statusDiv.innerHTML = '<div class="status-message error">✗ Please select a GCS Integration</div>';
-                    createBtn.disabled = false;
-                    createBtn.innerHTML = '🚀 Create faasProxy Driver';
-                    return;
-                }
-            }
-            
-            const formData = {
-                driverName: document.getElementById('driverName').value,
-                integrationId: integrationId,
-                integrationType: integrationType,
-                bucketName: document.getElementById('bucketName').value,
-                path: document.getElementById('path').value || null,
-                allowExternalDelete: document.getElementById('allowExternalDelete').checked
-            };
-            
-            try {
-                const response = await fetch('/api/create-faas-proxy-driver', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(formData)
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    statusDiv.innerHTML = `<div class="status-message success">✓ ${data.exists ? 'Driver already exists' : 'Driver created successfully'}!</div>`;
-                    resultDiv.innerHTML = `
-                        <div class="info-box">
-                            <p><strong>Driver ID:</strong> <code style="font-family: 'JetBrains Mono', monospace; background: var(--bg-tertiary); padding: 4px 8px; border-radius: 4px;">${data.driver.id}</code></p>
-                            <p><strong>Driver Name:</strong> ${data.driver.name}</p>
-                            <p><strong>Bucket:</strong> ${data.driver.bucket}</p>
-                            <p style="margin-top: 12px;">Use this Driver ID when creating datasets in the workflow.</p>
-                            <button class="btn btn-small btn-primary" data-driver-id="${(data.driver.id + '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}" onclick="copyDriverId(this.getAttribute('data-driver-id'))" style="margin-top: 8px;">Copy Driver ID</button>
-                        </div>
-                    `;
-                    
-                    // Reload drivers list
-                    loadDrivers();
-                } else {
-                    const errText = (data.error || data.message || 'Unknown error').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-                    statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${errText}</div>`;
-                }
-            } catch (error) {
-                statusDiv.innerHTML = `<div class="status-message error">✗ Error: ${error.message}</div>`;
-            } finally {
-                createBtn.disabled = false;
-                createBtn.innerHTML = '🚀 Create faasProxy Driver';
-            }
-        }
-
-        async function checkOrgAccess() {
-            const checkingEl = document.getElementById('orgAccessChecking');
-            const noPermEl = document.getElementById('noOrgPermissionSection');
-            const driverEl = document.getElementById('driverSection');
-            
-            try {
-                const response = await fetch('/api/org-access');
-                const data = await response.json();
-                
-                checkingEl.style.display = 'none';
-                
-                if (data.hasOrgPermission) {
-                    driverEl.style.display = 'block';
-                    loadIntegrations();
-                    loadDrivers();
-                } else {
-                    noPermEl.style.display = 'block';
-                    document.getElementById('noPermOrgName').textContent = data.orgName || '—';
-                    document.getElementById('noPermOrgId').textContent = data.orgId ? 'ID: ' + data.orgId : '—';
-                    var orgMembersLink = document.getElementById('orgMembersLink');
-                    if (orgMembersLink && data.orgMembersUrl) {
-                        orgMembersLink.href = data.orgMembersUrl;
-                        orgMembersLink.style.display = 'inline';
-                    } else if (orgMembersLink) {
-                        orgMembersLink.style.display = 'none';
-                    }
-                    var botUserName = data.botUserName || data.bot_user_name;
-                    var identityFallback = data.currentIdentity;
-                    var botEl = document.getElementById('noPermBotUserName');
-                    var fallbackEl = document.getElementById('noPermIdentityFallback');
-                    if (botUserName) {
-                        botEl.textContent = botUserName;
-                        botEl.style.display = 'block';
-                        fallbackEl.style.display = 'none';
-                    } else if (identityFallback) {
-                        botEl.textContent = identityFallback;
-                        botEl.style.display = 'block';
-                        fallbackEl.style.display = 'none';
-                    } else {
-                        botEl.textContent = 'Unknown (check service has botUserName set)';
-                        botEl.style.display = 'block';
-                        fallbackEl.style.display = 'none';
-                    }
-                }
-            } catch (error) {
-                checkingEl.style.display = 'none';
-                noPermEl.style.display = 'block';
-                document.getElementById('noPermOrgName').textContent = '—';
-                document.getElementById('noPermOrgId').textContent = 'Could not load org (check project is set)';
-                document.getElementById('noPermBotUserName').textContent = '—';
-                document.getElementById('noPermIdentityFallback').style.display = 'none';
-                var orgMembersLink = document.getElementById('orgMembersLink');
-                if (orgMembersLink) orgMembersLink.style.display = 'none';
-            }
-        }
-
-        // Check org access first, then show driver UI or no-permission message
         window.addEventListener('DOMContentLoaded', () => {
-            checkOrgAccess();
-            // Attach Create button click so the request is always sent (no reliance on form submit)
-            var createBtn = document.getElementById('createBtn');
-            var driverForm = document.getElementById('driverForm');
-            if (createBtn) {
-                createBtn.addEventListener('click', function(e) {
+            loadHybridDrivers();
+            loadHybridComputeStorages();
+            var hybridCreateBtn = document.getElementById('hybridCreateBtn');
+            var hybridDriverForm = document.getElementById('hybridDriverForm');
+            if (hybridCreateBtn) {
+                hybridCreateBtn.addEventListener('click', function(e) {
                     e.preventDefault();
-                    createDriver(e);
+                    createHybridDriver(e);
                 });
             }
-            if (driverForm) {
-                driverForm.addEventListener('submit', function(e) {
+            if (hybridDriverForm) {
+                hybridDriverForm.addEventListener('submit', function(e) {
                     e.preventDefault();
-                    createDriver(e);
+                    createHybridDriver(e);
                 });
             }
         });

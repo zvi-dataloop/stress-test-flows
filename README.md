@@ -6,7 +6,7 @@ Dataloop Package (DPK) application with custom server panel for interactive stre
 
 - **Custom Server Panel**: Serves interactive HTML documentation
 - **API Endpoints**: Execute stress-test functions and stream logs
-- **Interactive Workflow**: Run full workflow (Download → Link Items → Create Pipeline → Execute Batch) from the UI
+- **Interactive Workflow**: Run full workflow (Download → Dataset sync → Create Pipeline → Execute Batch) from the UI
 - **Live Logs**: Real-time log streaming from service executions
 - **Visual Progress**: Step indicators and progress bars
 
@@ -24,7 +24,6 @@ dpk/
         ├── step1-compute-setup.html
         ├── step2-project.html
         ├── step3-download-images.html
-        ├── step4-link-items.html
         ├── step5-pipeline.html
         └── step6-execute.html  # Interactive execution page
 ```

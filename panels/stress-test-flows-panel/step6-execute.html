@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Step 6: Execute Pipeline - Nginx Stress-Test</title>
+    <title>Step 5: Execute Pipeline - Nginx Stress-Test</title>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
@@ -122,10 +122,10 @@
 <body>
     <div class="container" style="height: 100vh; overflow-y: scroll;">
         <div class="breadcrumb">
-            <a href="index.html">Overview</a><span>›</span><span>Step 6: Execute Pipeline</span>
+            <a href="index.html">Overview</a><span>›</span><span>Step 5: Execute Pipeline</span>
         </div>
         <div class="page-header">
-            <div class="step-badge">6</div>
+            <div class="step-badge">5</div>
             <div class="page-title">
                 <h1>Execute Pipeline Cycles</h1>
                 <p>Run pipeline on entire dataset to stress test nginx gateway</p>
@@ -136,7 +136,6 @@
             <a href="step1-compute-setup.html" class="nav-pill">Compute Setup</a>
             <a href="step2-project.html" class="nav-pill">Project & Dataset</a>
             <a href="step3-download-images.html" class="nav-pill">Download Images</a>
-            <a href="step4-link-items.html" class="nav-pill">Link Items</a>
             <a href="step5-pipeline.html" class="nav-pill">Pipeline</a>
             <a href="step6-execute.html" class="nav-pill active">Execute</a>
         </nav>
@@ -145,7 +144,7 @@
         <div class="control-panel">
             <h2>Run Full Stress Test Workflow</h2>
             <p style="color: var(--text-secondary); margin-bottom: 20px;">
-                Execute all steps sequentially: Download Images → Create Link Items → Create Pipeline → Execute Batch
+                Execute all steps sequentially: Download Images → Dataset sync (HYBRID) → Create Pipeline → Execute Batch
             </p>
             
             <div class="config-form">
@@ -166,7 +165,7 @@
                 <div class="form-group">
                     <label>Link Base URL</label>
                     <input type="text" id="linkBaseUrl" value="" placeholder="e.g. https://my-domain.ai/serve-agent/root-folder/subfolder">
-                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Full URL where images are served. Link items will point to <code>{Link Base URL}/{filename}</code>. Format: <strong>serve-agent path</strong> + <strong>path inside storage</strong>.</small>
+                    <small style="color: var(--text-muted); font-size: 11px; margin-top: 4px; display: block;">Optional when using HYBRID + Driver ID: downloads use the driver’s <strong>path</strong> on compute storage (same root as the dataset). Set this if you need a different directory or non-HYBRID link URLs. Format: <strong>serve-agent</strong> + <strong>path inside storage</strong>.</small>
                     <details style="margin-top: 8px; font-size: 11px; color: var(--text-muted);">
                         <summary style="cursor: pointer;">How to build the Link Base URL</summary>
                         <p style="margin: 6px 0 4px 0;">Link Base URL = <strong>serve-agent path</strong> + <strong>path inside storage</strong>. No trailing slash.</p>
@@ -249,7 +248,7 @@
             <div class="exec-flow">
                 <div class="flow-box" id="step1"><div class="icon">📥</div><div class="label">Download Images</div></div>
                 <span class="flow-arrow">→</span>
-                <div class="flow-box" id="step2"><div class="icon">🔗</div><div class="label">Link Items</div></div>
+                <div class="flow-box" id="step2"><div class="icon">🔄</div><div class="label">Dataset sync</div></div>
                 <span class="flow-arrow">→</span>
                 <div class="flow-box" id="step3"><div class="icon">⚙️</div><div class="label">Create Pipeline</div></div>
                 <span class="flow-arrow">→</span>
@@ -273,9 +272,9 @@
             <ul class="checklist">
                 <li><span class="check-icon">✓</span>Compute setup completed</li>
                 <li><span class="check-icon">✓</span>Rubiks v1.41.1-rc.18 deployed</li>
-                <li><span class="check-icon">✓</span>Project and faasProxy dataset created</li>
-                <li><span class="check-icon">✓</span>Images downloaded to Storage</li>
-                <li><span class="check-icon">✓</span>Link items created in dataset</li>
+                <li><span class="check-icon">✓</span>HYBRID storage driver and dataset configured</li>
+                <li><span class="check-icon">✓</span>Images downloaded to compute storage</li>
+                <li><span class="check-icon">✓</span>Dataset indexed (<code>dataset.sync()</code>) after download</li>
                 <li><span class="check-icon">✓</span>Pipeline created with ResNet function</li>
                 <li><span class="check-icon">✓</span>Monitoring dashboards ready</li>
             </ul>

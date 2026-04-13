@@ -93,7 +93,7 @@
                     <div class="layer-content">
                         <div class="arch-box resnet"><div class="icon">🤖</div><div class="label">ResNet Function</div></div>
                         <div class="arch-box storage"><div class="icon">📁</div><div class="label">Cloud Storage</div></div>
-                        <div class="arch-box"><div class="icon">🔗</div><div class="label">faasProxy Dataset</div></div>
+                        <div class="arch-box"><div class="icon">🔄</div><div class="label">HYBRID Dataset</div></div>
                     </div>
                 </div>
             </div>
@@ -146,7 +146,7 @@
                     <div class="specs">
                         <div class="spec-row"><span class="spec-label">Type</span><span class="spec-value">Storage</span></div>
                         <div class="spec-row"><span class="spec-label">Mount</span><span class="spec-value">/mnt/storage</span></div>
-                        <div class="spec-row"><span class="spec-label">Access</span><span class="spec-value">via LinkItem</span></div>
+                        <div class="spec-row"><span class="spec-label">Access</span><span class="spec-value">via HYBRID sync</span></div>
                     </div>
                 </div>
                 <div class="component-card">
@@ -159,11 +159,11 @@
                     </div>
                 </div>
                 <div class="component-card">
-                    <h3>🔗 faasProxy Dataset</h3>
-                    <p>Dataset with LinkItems referencing Storage images.</p>
+                    <h3>🔄 HYBRID Dataset</h3>
+                    <p>Dataset on compute storage; items indexed with <code>dataset.sync()</code> (no per-file link items).</p>
                     <div class="specs">
-                        <div class="spec-row"><span class="spec-label">Driver</span><span class="spec-value">faasProxy</span></div>
-                        <div class="spec-row"><span class="spec-label">Items</span><span class="spec-value">LinkItem</span></div>
+                        <div class="spec-row"><span class="spec-label">Driver</span><span class="spec-value">HYBRID</span></div>
+                        <div class="spec-row"><span class="spec-label">Indexing</span><span class="spec-value">sync()</span></div>
                         <div class="spec-row"><span class="spec-label">Execution</span><span class="spec-value">Batch execution command</span></div>
                     </div>
                 </div>
