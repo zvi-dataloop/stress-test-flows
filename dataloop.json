@@ -61,7 +61,7 @@
         "name": "stress-test-ui-service",
         "moduleName": "stress-test-server",
         "versions": {
-          "dtlpy": "1.121.5"
+          "dtlpy": "1.122.12"
         },
         "runtime": {
           "podType": "regular-m",
