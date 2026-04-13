@@ -1,6 +1,10 @@
 """
-Standalone worker for process-pool image download + link item creation.
+Standalone worker for process-pool image download + optional dataset upload.
 This module is imported by child processes only, so it must not import main.py.
+upload_mode: 'none' | 'link' | 'file'
+  - none: download only to storage_path
+  - link: download + link JSON items (legacy NFS + URL)
+  - file: download to temp path + dataset.items.upload binary file, then delete local file
 """
 import os
 import json
@@ -55,10 +59,20 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
     )
 
 
+def _upload_one_file_to_dataset_standalone(dataset, filepath: str, filename: str, remote_path: str = '/'):
+    dataset.items.upload(
+        local_path=filepath,
+        remote_path=remote_path,
+        remote_name=filename,
+        overwrite=True,
+    )
+
+
 def run_download_chunk(args):
     """
-    Entry point for process pool: download a chunk of URLs and create link items when requested.
-    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, workflow_id, create_link, threads_per_process [, progress_queue])
+    Entry point for process pool.
+    Args: (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id, workflow_id, upload_mode, threads_per_process [, progress_queue])
+    upload_mode: 'none' | 'link' | 'file'
     progress_queue: optional; when provided, put(1) per completed item so main process can show accurate progress.
     Returns: (downloaded, failed, skipped, error_str or None)
     """
@@ -67,21 +81,32 @@ def run_download_chunk(args):
         parts = list(args)
         progress_queue = parts.pop() if len(parts) == 9 else None
         (chunk_urls, storage_path, link_base_url_full, dataset_id, project_id,
-         workflow_id, create_link, threads_per_process) = parts
+         workflow_id, upload_mode, threads_per_process) = parts
+        upload_mode = upload_mode or 'none'
         cancel_file = f"/tmp/stress_cancel_{workflow_id}" if workflow_id else None
 
         def _is_cancelled():
             return cancel_file and os.path.exists(cancel_file)
 
-        link_dataset = None
-        if create_link and dataset_id and link_base_url_full:
+        ds = None
+        if upload_mode == 'file' and dataset_id:
             try:
                 pid = project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
                 if pid:
                     project = dl.projects.get(project_id=pid)
-                    link_dataset = project.datasets.get(dataset_id=dataset_id)
+                    ds = project.datasets.get(dataset_id=dataset_id)
                 else:
-                    link_dataset = dl.datasets.get(dataset_id=dataset_id)
+                    ds = dl.datasets.get(dataset_id=dataset_id)
+            except Exception as e:
+                log.warning(f"Could not get dataset in worker: {e}")
+        elif upload_mode == 'link' and dataset_id and link_base_url_full:
+            try:
+                pid = project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
+                if pid:
+                    project = dl.projects.get(project_id=pid)
+                    ds = project.datasets.get(dataset_id=dataset_id)
+                else:
+                    ds = dl.datasets.get(dataset_id=dataset_id)
             except Exception as e:
                 log.warning(f"Could not get dataset in worker: {e}")
 
@@ -97,9 +122,33 @@ def run_download_chunk(args):
                     response.raise_for_status()
                     with open(filepath, 'wb') as f:
                         f.write(response.content)
-                if link_dataset is not None and link_base_url_full and not _is_cancelled():
+
+                if upload_mode == 'file':
+                    if ds is None or _is_cancelled():
+                        if os.path.isfile(filepath):
+                            try:
+                                os.remove(filepath)
+                            except OSError:
+                                pass
+                        return {'success': False, 'url': url, 'error': 'no_dataset'}
                     try:
-                        _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, overwrite=True)
+                        _upload_one_file_to_dataset_standalone(ds, filepath, filename, '/')
+                    except Exception as up_err:
+                        log.warning(f"File upload failed for {filename}: {up_err}")
+                        try:
+                            os.remove(filepath)
+                        except OSError:
+                            pass
+                        return {'success': False, 'url': url, 'error': str(up_err)}
+                    try:
+                        os.remove(filepath)
+                    except OSError:
+                        pass
+                    return {'success': True, 'filename': filename, 'path': None, 'skipped': False}
+
+                if upload_mode == 'link' and ds is not None and link_base_url_full and not _is_cancelled():
+                    try:
+                        _upload_one_link_item_standalone(ds, filename, link_base_url_full, overwrite=True)
                     except Exception as link_err:
                         log.warning(f"Ensure link item failed for {filename}: {link_err}")
                 return {'success': True, 'filename': filename, 'path': str(filepath), 'skipped': file_existed}

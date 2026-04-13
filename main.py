@@ -7,6 +7,8 @@ Combines UI server and stress test execution in one service.
 import os
 import json
 import logging
+import tempfile
+import shutil
 import secrets
 import time
 import threading
@@ -125,32 +127,103 @@ def get_coco_images(dataset: str = 'all', progress_callback=None):
             except:
                 pass
     
-    # Fallback: download annotations (~250MB, one-time; can take 5–10 min)
+    # Fallback: fetch official instances_*.json (much smaller than the 250MB trainval zip; shows progress while downloading)
     if not train_ids and not val_ids:
-        msg = "Downloading COCO annotations (~250MB, one-time)..."
-        logger.info(f"Bundled files not found, {msg}")
-        if progress_callback:
-            try:
-                progress_callback('download_images', 'running', 15, msg)
-            except Exception:
-                pass
+        COCO_INST_TRAIN = 'http://images.cocodataset.org/annotations/instances_train2017.json'
+        COCO_INST_VAL = 'http://images.cocodataset.org/annotations/instances_val2017.json'
+        COCO_ZIP = 'http://images.cocodataset.org/annotations/annotations_trainval2017.zip'
+
+        def _report(pct_floor: int, pct_ceil: int, message: str):
+            if progress_callback:
+                try:
+                    progress_callback('download_images', 'running', pct_floor, message)
+                except Exception:
+                    pass
+
+        def _download_json_stream(url: str, label: str, pct_lo: int, pct_hi: int) -> dict:
+            logger.info(f'GET {url} ({label})')
+            _report(pct_lo, pct_hi, f'COCO: starting {label}…')
+            r = requests.get(url, stream=True, timeout=120)
+            r.raise_for_status()
+            total = int(r.headers.get('content-length') or 0)
+            buf = io.BytesIO()
+            got = 0
+            last_log = 0
+            for chunk in r.iter_content(chunk_size=1024 * 512):
+                if not chunk:
+                    continue
+                buf.write(chunk)
+                got += len(chunk)
+                if total and progress_callback:
+                    sub = pct_lo + (pct_hi - pct_lo) * (got / total)
+                    if got - last_log >= 5 * 1024 * 1024 or got == total:
+                        last_log = got
+                        mb = got / (1024 * 1024)
+                        tmb = total / (1024 * 1024)
+                        try:
+                            progress_callback(
+                                'download_images', 'running', min(19, int(sub)),
+                                f'COCO annotations: {label} — {mb:.1f} / {tmb:.1f} MB',
+                            )
+                        except Exception:
+                            pass
+            buf.seek(0)
+            return json.load(buf)
+
         try:
-            url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
-            response = requests.get(url, timeout=600)
-            response.raise_for_status()
-            
-            with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-                with z.open('annotations/instances_train2017.json') as f:
-                    train_annotations = json.load(f)
-                with z.open('annotations/instances_val2017.json') as f:
-                    val_annotations = json.load(f)
-            
-            train_ids = [img['id'] for img in train_annotations.get('images', [])]
-            val_ids = [img['id'] for img in val_annotations.get('images', [])]
-            logger.info(f"Downloaded: {len(train_ids)} train, {len(val_ids)} val")
-            
+            if dataset == 'val2017':
+                val_ann = _download_json_stream(COCO_INST_VAL, 'val2017 instances', 15, 19)
+                val_ids = [img['id'] for img in val_ann.get('images', [])]
+            elif dataset == 'train2017':
+                train_ann = _download_json_stream(COCO_INST_TRAIN, 'train2017 instances', 15, 19)
+                train_ids = [img['id'] for img in train_ann.get('images', [])]
+            else:
+                _report(15, 16, 'COCO: downloading val annotation JSON (~9 MB)…')
+                val_ann = _download_json_stream(COCO_INST_VAL, 'val2017 instances', 16, 17)
+                val_ids = [img['id'] for img in val_ann.get('images', [])]
+                _report(17, 18, 'COCO: downloading train annotation JSON (~80 MB)…')
+                train_ann = _download_json_stream(COCO_INST_TRAIN, 'train2017 instances', 17, 19)
+                train_ids = [img['id'] for img in train_ann.get('images', [])]
+            logger.info(f"Downloaded JSON ids: {len(train_ids)} train, {len(val_ids)} val")
         except Exception as e:
-            logger.error(f"Failed to download annotations: {e}")
+            logger.warning(f'COCO JSON download failed ({e}), falling back to trainval zip (large, slow)…')
+            msg = "Downloading COCO annotations zip (~250MB) — this can take many minutes…"
+            if progress_callback:
+                try:
+                    progress_callback('download_images', 'running', 15, msg)
+                except Exception:
+                    pass
+            try:
+                r = requests.get(COCO_ZIP, stream=True, timeout=600)
+                r.raise_for_status()
+                total = int(r.headers.get('content-length') or 0)
+                buf = io.BytesIO()
+                got = 0
+                last_zip_log = 0
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        buf.write(chunk)
+                        got += len(chunk)
+                        if total and progress_callback and (got - last_zip_log >= 10 * 1024 * 1024 or got == total):
+                            last_zip_log = got
+                            try:
+                                progress_callback(
+                                    'download_images', 'running', 15 + int(4 * got / total),
+                                    f'COCO zip: {got / (1024*1024):.0f} / {total / (1024*1024):.0f} MB',
+                                )
+                            except Exception:
+                                pass
+                buf.seek(0)
+                with zipfile.ZipFile(buf) as z:
+                    with z.open('annotations/instances_train2017.json') as f:
+                        train_annotations = json.load(f)
+                    with z.open('annotations/instances_val2017.json') as f:
+                        val_annotations = json.load(f)
+                train_ids = [img['id'] for img in train_annotations.get('images', [])]
+                val_ids = [img['id'] for img in val_annotations.get('images', [])]
+                logger.info(f"Downloaded from zip: {len(train_ids)} train, {len(val_ids)} val")
+            except Exception as e2:
+                logger.error(f"Failed to download annotations: {e2}")
     
     # Build URL list based on dataset selection
     urls = []
@@ -707,6 +780,16 @@ def _upload_one_link_item_standalone(dataset, filename: str, link_base_url_full:
         remote_path=remote_path,
         remote_name=json_filename,
         overwrite=overwrite
+    )
+
+
+def _upload_one_file_to_dataset_standalone(dataset, filepath: str, filename: str, remote_path: str = '/'):
+    """Upload a local image file into the dataset (not a link item). Used from workers / HYBRID temp-upload flow."""
+    dataset.items.upload(
+        local_path=filepath,
+        remote_path=remote_path,
+        remote_name=filename,
+        overwrite=True,
     )
 
 
@@ -1631,7 +1714,7 @@ class StressTestHandler(SimpleHTTPRequestHandler):
             "skipPipeline": false,  # or "skip_pipeline"
             "skipExecute": false,  # or "skip_execute"
             "linkBaseUrl": "...",  # or "link_base_url" (optional, base URL for link items)
-            "hybridStorage": true,  # or "hybrid_storage" - HYBRID driver: no link items; dataset.sync() indexes files
+            "hybridStorage": true,  # or "hybrid_storage" - HYBRID: download to temp, upload files to dataset (no link-path storage, no sync)
         }
         
         Note: Service ID and Project ID are automatically detected - no need to provide them.
@@ -3403,30 +3486,46 @@ class StressTestServer(dl.BaseServiceRunner):
     
     def download_images(self, image_urls: list = None, max_images: int = 50000, num_workers: int = 50, dataset: str = 'all', progress_callback=None,
                         create_link_on_download: bool = True, dataset_id: str = None, link_base_url: str = None, project_id: str = None, workflow_id: str = None,
-                        storage_path_override: str = None) -> dict:
+                        storage_path_override: str = None, upload_files_to_dataset: bool = False) -> dict:
         """
-        Download images from COCO to NFS storage.
+        Download images from COCO. Either save under a storage path (NFS/link flow) or download to a temp folder
+        and upload each file into the dataset via ``dataset.items.upload`` (HYBRID-friendly, no local persistence).
         
         Args:
             image_urls: List of image URLs to download (default: COCO train+val)
             max_images: Maximum number of images to download (default: 50000)
             num_workers: Number of parallel download workers (default: 50)
             dataset: 'train2017' (118k), 'val2017' (5k), or 'all' (123k)
-            create_link_on_download: If True (default), create link item in dataset as soon as each image is downloaded (faster). Set False to only download; pass dataset_id and link_base_url when True.
-            dataset_id: Required when create_link_on_download=True; dataset to add link items to.
-            link_base_url: Required when create_link_on_download=True; base URL for link items.
-            project_id: Required when create_link_on_download=True for dataset access.
-            workflow_id: If set, download stops when workflow is cancelled (status 'cancelling'); no new link items are created after cancel.
-            storage_path_override: If set, write files to this absolute path (used for HYBRID driver.path alignment).
+            create_link_on_download: If True (default), create link JSON items (legacy). Ignored when upload_files_to_dataset=True.
+            dataset_id: Required when uploading link items or file uploads to dataset.
+            link_base_url: Base URL for link items (non-upload mode).
+            project_id: Project ID for dataset access.
+            workflow_id: If set, download stops when workflow is cancelled (status 'cancelling').
+            storage_path_override: NFS path when not using upload_files_to_dataset.
+            upload_files_to_dataset: If True, use a temp directory, upload each image file to the dataset, delete local file; no link path storage.
         
         Returns:
             dict with download results
         """
+        upload_files_to_dataset = bool(upload_files_to_dataset)
+        if upload_files_to_dataset and not dataset_id:
+            return {
+                'error': 'dataset_id is required when upload_files_to_dataset=True',
+                'files': [],
+                'total_requested': 0,
+                'downloaded': 0,
+                'skipped': 0,
+                'failed': 0,
+                'upload_mode': 'file',
+            }
         # Get COCO image URLs if not provided (may take several minutes if annotations must be downloaded)
         if image_urls is None:
             if progress_callback:
                 try:
-                    progress_callback('download_images', 'running', 15, 'Preparing COCO image list (first run may download ~250MB annotations)...')
+                    progress_callback(
+                        'download_images', 'running', 15,
+                        'Preparing COCO image list (first run downloads annotation JSON from cocodataset.org; progress updates follow)…',
+                    )
                 except Exception:
                     pass
             logger.info(f"Fetching COCO image list (dataset={dataset}, max={max_images})...")
@@ -3440,22 +3539,31 @@ class StressTestServer(dl.BaseServiceRunner):
             logger.info(f"Will download {len(image_urls)} images (out of {len(all_urls)} available)")
         
         total_images = len(image_urls)
-        # Prefer explicit override (e.g. HYBRID driver.path from run_full_stress_test); else Link Base URL; else default
-        if storage_path_override and str(storage_path_override).strip():
-            storage_path = str(storage_path_override).strip()
-            if not storage_path.startswith('/'):
-                storage_path = '/' + storage_path.lstrip('/')
+        temp_dir_created = False
+        if upload_files_to_dataset:
+            storage_path = tempfile.mkdtemp(prefix='stress_coco_')
+            temp_dir_created = True
+            link_base_url_full = None
+            upload_mode = 'file'
+            logger.info(
+                f"upload_files_to_dataset: temp dir {storage_path} — each image is uploaded to dataset then deleted locally"
+            )
         else:
-            link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
-            storage_path = _storage_path_from_link_base_url(link_base_for_storage) if link_base_for_storage else None
-            if storage_path is None:
-                storage_path = self.storage_path
-        logger.info(f"Starting download of {total_images} images to {storage_path}")
-        # Resolve link_base_url for workers (each process will get dataset by id; no shared memory)
-        link_base_url_full = None
-        if create_link_on_download and dataset_id and link_base_url:
-            link_base_url_full = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
-        create_link = bool(create_link_on_download and dataset_id and link_base_url_full)
+            if storage_path_override and str(storage_path_override).strip():
+                storage_path = str(storage_path_override).strip()
+                if not storage_path.startswith('/'):
+                    storage_path = '/' + storage_path.lstrip('/')
+            else:
+                link_base_for_storage = link_base_url or (self.link_base_url if (create_link_on_download and dataset_id) else None)
+                storage_path = _storage_path_from_link_base_url(link_base_for_storage) if link_base_for_storage else None
+                if storage_path is None:
+                    storage_path = self.storage_path
+            link_base_url_full = None
+            if create_link_on_download and dataset_id:
+                link_base_url_full = (link_base_url or self.link_base_url or DEFAULT_LINK_BASE_URL).strip().rstrip('/')
+            upload_mode = 'link' if (create_link_on_download and dataset_id and link_base_url_full) else 'none'
+
+        logger.info(f"Starting download of {total_images} images to {storage_path} (mode={upload_mode})")
         pid = project_id or self.project_id or os.environ.get('PROJECT_ID') or os.environ.get('DL_PROJECT_ID')
         num_threads = num_workers if num_workers and num_workers > 0 else DOWNLOAD_THREADS_PER_PROCESS
 
@@ -3469,16 +3577,27 @@ class StressTestServer(dl.BaseServiceRunner):
             _use_process_pool = False
             logger.info("download_worker not found: using threads only (commit download_worker.py for multiprocessing)")
 
+        # File uploads must run in the main process: child processes get a fresh dtlpy (sdk/check, token/cookie)
+        # and often hang or fail on dataset.items.upload; link-only mode is OK in workers.
+        if upload_mode == 'file':
+            _use_process_pool = False
+            logger.info(
+                'Dataset file upload mode: using in-process threads only (not process pool — avoids dtlpy/auth deadlocks in workers)'
+            )
+
         if _use_process_pool:
             logger.info(f"Using process pool: chunks of {DOWNLOAD_CHUNK_SIZE}, {num_threads} threads per process, max {DOWNLOAD_MAX_PROCESSES} processes")
-            if create_link:
-                logger.info("Create-link-on-download enabled: each process will create link items after download")
+            if upload_mode == 'link':
+                logger.info("Create-link-on-download: each process creates link items after download")
+            elif upload_mode == 'file':
+                logger.info("File upload to dataset: each process uploads then removes temp file")
         else:
             logger.info(f"Using {num_threads} threads (single process)")
-            if create_link:
-                logger.info("Create-link-on-download enabled: will create link item after each download")
+            if upload_mode == 'link':
+                logger.info("Create-link-on-download: link item after each download")
+            elif upload_mode == 'file':
+                logger.info("File upload to dataset after each download")
 
-        # Create directory
         os.makedirs(storage_path, exist_ok=True)
 
         downloaded = []
@@ -3497,7 +3616,7 @@ class StressTestServer(dl.BaseServiceRunner):
             manager = mp.Manager()
             progress_queue = manager.Queue()
             worker_args = [
-                (chunk, storage_path, link_base_url_full, dataset_id, pid, workflow_id, create_link, num_threads, progress_queue)
+                (chunk, storage_path, link_base_url_full, dataset_id, pid, workflow_id, upload_mode, num_threads, progress_queue)
                 for chunk in chunks
             ]
             try:
@@ -3567,7 +3686,16 @@ class StressTestServer(dl.BaseServiceRunner):
         else:
             # Thread pool only (no pickle; works when download_worker is not in the package)
             link_dataset = None
-            if create_link and dataset_id and link_base_url_full:
+            if upload_mode == 'file' and dataset_id:
+                try:
+                    if pid:
+                        project = dl.projects.get(project_id=pid)
+                        link_dataset = project.datasets.get(dataset_id=dataset_id)
+                    else:
+                        link_dataset = dl.datasets.get(dataset_id=dataset_id)
+                except Exception as e:
+                    logger.warning(f"Could not get dataset for file upload: {e}")
+            elif upload_mode == 'link' and dataset_id and link_base_url_full:
                 try:
                     if pid:
                         project = dl.projects.get(project_id=pid)
@@ -3589,7 +3717,29 @@ class StressTestServer(dl.BaseServiceRunner):
                         response.raise_for_status()
                         with open(filepath, 'wb') as f:
                             f.write(response.content)
-                    if link_dataset is not None and link_base_url_full and not _is_cancelled():
+                    if upload_mode == 'file':
+                        if link_dataset is None or _is_cancelled():
+                            try:
+                                if os.path.isfile(filepath):
+                                    os.remove(filepath)
+                            except OSError:
+                                pass
+                            return {'success': False, 'url': url, 'error': 'no_dataset'}
+                        try:
+                            _upload_one_file_to_dataset_standalone(link_dataset, filepath, filename, '/')
+                        except Exception as up_err:
+                            logger.warning(f"File upload failed for {filename}: {up_err}")
+                            try:
+                                os.remove(filepath)
+                            except OSError:
+                                pass
+                            return {'success': False, 'url': url, 'error': str(up_err)}
+                        try:
+                            os.remove(filepath)
+                        except OSError:
+                            pass
+                        return {'success': True, 'filename': filename, 'path': None, 'skipped': False}
+                    if upload_mode == 'link' and link_dataset is not None and link_base_url_full and not _is_cancelled():
                         try:
                             _upload_one_link_item_standalone(link_dataset, filename, link_base_url_full, overwrite=True)
                         except Exception as link_err:
@@ -3627,20 +3777,28 @@ class StressTestServer(dl.BaseServiceRunner):
                             progress_callback('download_images', 'running', overall_progress, progress_msg)
         logger.info(f"Download complete: {len(downloaded)} new, {len(skipped)} skipped, {len(failed)} failed" + (f", {cancelled_count} cancelled" if cancelled_count else ""))
 
-        
-        # List actual files in directory
-        actual_files = []
-        if os.path.exists(storage_path):
-            actual_files = [f for f in os.listdir(storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
-        
+        if upload_files_to_dataset:
+            actual_files = sorted({r.get('filename') for r in downloaded + skipped if r.get('filename')})
+        else:
+            actual_files = []
+            if os.path.exists(storage_path):
+                actual_files = [f for f in os.listdir(storage_path) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+
+        if temp_dir_created and storage_path and os.path.isdir(storage_path):
+            try:
+                shutil.rmtree(storage_path, ignore_errors=True)
+            except Exception as rm_err:
+                logger.warning(f"Temp download dir cleanup: {rm_err}")
+
         out = {
-            'storage_path': storage_path,
+            'storage_path': storage_path if not upload_files_to_dataset else '(temp removed)',
             'total_requested': total_images,
             'downloaded': len(downloaded),
             'skipped': len(skipped),
             'failed': len(failed),
             'actual_files_on_disk': len(actual_files),
-            'files': actual_files
+            'files': actual_files,
+            'upload_mode': upload_mode,
         }
         if cancelled_count:
             out['cancelled'] = cancelled_count
@@ -5515,7 +5673,7 @@ class ServiceRunner:
             skip_pipeline: Skip pipeline creation
             skip_execute: Skip pipeline execution
             link_base_url: Fallback for download directory when HYBRID driver path is unavailable; also used for non-HYBRID link items (overrides instance default)
-            hybrid_storage: HYBRID driver flow — no per-file link items; sync dataset after create and after download phase (default: True)
+            hybrid_storage: If True (default), download images to temp files and upload each file to the dataset; no NFS link path and no dataset.sync()
             stream_image_concurrency: Code node (stream-image) concurrency (default: pipeline_concurrency)
             stream_image_max_replicas: Code node max replicas (default: pipeline_max_replicas)
             resnet_concurrency: ResNet node concurrency (default: pipeline_concurrency)
@@ -5530,22 +5688,27 @@ class ServiceRunner:
         _resnet_concurrency = resnet_concurrency if resnet_concurrency is not None else 10
         _resnet_max_replicas = resnet_max_replicas if resnet_max_replicas is not None else pipeline_max_replicas
 
-        # HYBRID: prefer the driver's path (dataset root on compute storage). Else Link Base URL → path; else server default.
+        # HYBRID: temp download + file upload to dataset (no link-path storage, no sync). Else: NFS path from driver / link URL / default.
         effective_storage_path = None
         storage_path_source = None
-        if hybrid_storage and driver_id and project_id:
-            dp = _fetch_hybrid_driver_storage_path(driver_id, project_id)
-            if dp:
-                effective_storage_path = dp
-                storage_path_source = 'hybrid_driver_path'
-                logger.info(f'Using HYBRID driver storage path (dataset root): {effective_storage_path}')
-        if effective_storage_path is None and link_base_url:
-            effective_storage_path = _storage_path_from_link_base_url(link_base_url)
-            if effective_storage_path:
-                storage_path_source = 'link_base_url'
-        if effective_storage_path is None:
-            effective_storage_path = self.storage_path
-            storage_path_source = storage_path_source or 'server_default'
+        if hybrid_storage:
+            effective_storage_path = '(temp upload to dataset)'
+            storage_path_source = 'hybrid_temp_upload'
+            logger.info('HYBRID: images downloaded to temp files and uploaded to dataset via API')
+        else:
+            if driver_id and project_id:
+                dp = _fetch_hybrid_driver_storage_path(driver_id, project_id)
+                if dp:
+                    effective_storage_path = dp
+                    storage_path_source = 'hybrid_driver_path'
+                    logger.info(f'Using driver storage path: {effective_storage_path}')
+            if effective_storage_path is None and link_base_url:
+                effective_storage_path = _storage_path_from_link_base_url(link_base_url)
+                if effective_storage_path:
+                    storage_path_source = 'link_base_url'
+            if effective_storage_path is None:
+                effective_storage_path = self.storage_path
+                storage_path_source = storage_path_source or 'server_default'
         results = {
             'date': self.date_str,
             'storage_path': effective_storage_path,
@@ -5559,13 +5722,12 @@ class ServiceRunner:
         # When dataset_id is empty, we always create a new dataset (since we don't specify it in the test)
         # But first, check storage and existing datasets to determine if we need to download more images
         
-        # Check actual files in storage
         actual_files_on_disk = 0
-        if os.path.exists(effective_storage_path):
+        if not hybrid_storage and effective_storage_path and os.path.exists(effective_storage_path):
             actual_files_on_disk = len([f for f in os.listdir(effective_storage_path) 
                                        if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
         
-        logger.info(f"Storage check: {actual_files_on_disk} files found in {effective_storage_path}")
+        logger.info(f"Storage check: {actual_files_on_disk} files on disk at {effective_storage_path}" + (" (HYBRID: no local cache)" if hybrid_storage else ""))
         
         # Track if dataset_id was originally empty (before any creation)
         original_dataset_id_empty = (dataset_id is None or dataset_id == '')
@@ -5661,7 +5823,7 @@ class ServiceRunner:
                 project_id=project_id,
                 dataset_name=unique_dataset_name,
                 driver_id=driver_id,
-                sync_after_create=hybrid_storage,
+                sync_after_create=False,
             )
             results['steps'].append({
                 'step': 'create_dataset',
@@ -5760,14 +5922,14 @@ class ServiceRunner:
                 logger.info(f"        (Target: {max_images} total, Currently: {actual_files_on_disk} in storage)")
                 logger.info("=" * 60)
                 
-                # HYBRID: never create link items during download (items come from dataset.sync)
-                do_link_on_download = False if hybrid_storage else not (skip_link_items or dataset_has_items)
+                # HYBRID: temp files + dataset.items.upload; non-HYBRID: NFS + optional link items
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
-                    create_link_on_download=do_link_on_download,
+                    create_link_on_download=False if hybrid_storage else not (skip_link_items or dataset_has_items),
                     dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
                     workflow_id=getattr(self, '_current_workflow_id', None),
-                    storage_path_override=effective_storage_path,
+                    storage_path_override=None if hybrid_storage else effective_storage_path,
+                    upload_files_to_dataset=bool(hybrid_storage),
                 )
             else:
                 # Normal download
@@ -5776,13 +5938,13 @@ class ServiceRunner:
                 logger.info("=" * 60)
                 logger.info(f"STEP 1: Downloading {max_images} COCO images")
                 logger.info("=" * 60)
-                do_link_on_download = False if hybrid_storage else not (skip_link_items or dataset_has_items)
                 download_result = self.download_images(
                     max_images=max_images, num_workers=num_workers, dataset=coco_dataset, progress_callback=progress_callback,
-                    create_link_on_download=do_link_on_download,
+                    create_link_on_download=False if hybrid_storage else not (skip_link_items or dataset_has_items),
                     dataset_id=dataset_id, link_base_url=link_base_url, project_id=project_id,
                     workflow_id=getattr(self, '_current_workflow_id', None),
-                    storage_path_override=effective_storage_path,
+                    storage_path_override=None if hybrid_storage else effective_storage_path,
+                    upload_files_to_dataset=bool(hybrid_storage),
                 )
             
             results['steps'].append({
@@ -5804,7 +5966,7 @@ class ServiceRunner:
                 progress_callback('download_images', 'completed', 40, f'Downloaded {len(filenames)} images')
         else:
             # Get existing files (use same path as download would use when link_base_url is set)
-            if os.path.exists(effective_storage_path):
+            if not hybrid_storage and effective_storage_path and os.path.exists(effective_storage_path):
                 all_filenames = sorted([f for f in os.listdir(effective_storage_path) 
                             if f.lower().endswith(('.jpg', '.jpeg', '.png'))])
                 # Limit to max_images if we have more than needed (sorted for deterministic set)
@@ -5823,7 +5985,7 @@ class ServiceRunner:
         
         # Step 2: Create link items (only when download step was skipped - otherwise links are already ensured in the process-pool)
         # When we ran the download step, each worker ensures file exists + link item with correct URL (create or overwrite) for every item
-        # HYBRID: skip all link-item logic; dataset.sync indexes files from compute storage
+        # HYBRID: files already uploaded in download step
         should_skip_link_items = hybrid_storage or skip_link_items or dataset_has_items or (not should_skip_download)
         if not should_skip_link_items:
             if progress_callback:
@@ -5854,7 +6016,7 @@ class ServiceRunner:
                 progress_callback('create_link_items', 'completed', 60, f'Created {created} link items')
         else:
             if hybrid_storage:
-                skip_reason = 'HYBRID: items indexed via dataset.sync(), not link items'
+                skip_reason = 'HYBRID: file items uploaded during download step'
             elif not should_skip_download:
                 skip_reason = 'Link items already ensured in download step (process-pool)'
             else:
@@ -5870,15 +6032,7 @@ class ServiceRunner:
                 else:
                     progress_callback('create_link_items', 'skipped', 45, 'Skipped link items creation')
         
-        # HYBRID: sync again after download phase so new files on storage appear as dataset items
-        if hybrid_storage and dataset_id:
-            if progress_callback:
-                progress_callback('dataset_sync', 'running', 62, 'HYBRID: syncing dataset from storage...')
-            logger.info("HYBRID: dataset.sync() after download / link-items phase")
-            self._sync_dataset_after_hybrid_storage(dataset_id)
-            results['steps'].append({'step': 'dataset_sync', 'result': {'dataset_id': dataset_id}})
-            if progress_callback:
-                progress_callback('dataset_sync', 'completed', 64, 'HYBRID: dataset sync completed')
+        # HYBRID: items are uploaded during download — no dataset.sync()
         
         # Step 3: Create pipeline (requires dataset_id)
         pipeline_id = None
