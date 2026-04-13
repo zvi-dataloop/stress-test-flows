@@ -80,7 +80,7 @@
             <div class="step-badge">2</div>
             <div class="page-title">
                 <h1>Project & Dataset</h1>
-                <p>Create a HYBRID storage driver (compute storage) for datasets and the stress-test workflow</p>
+                <p>Connect this project to compute-backed storage by creating a HYBRID driver, then use it when you build datasets and run the workflow</p>
             </div>
         </div>
         <nav class="flow-nav">
@@ -95,22 +95,23 @@
         <div class="card">
             <h2>HYBRID storage driver (compute)</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                HYBRID drivers bind your project to <strong>compute cluster storage</strong> (NFS path on the FaaS compute volume).
-                The stress test uses <code>hybridStorage</code> (default): downloads go to that path and <code>dataset.sync()</code> indexes files—no per-file link items.
+                A <strong>HYBRID</strong> driver tells Dataloop which <strong>compute</strong> and which <strong>named storage</strong> on that compute (for example NFS or S3) should back datasets in this project. After you create it, you reference the driver when creating a dataset and in the stress-test workflow (for example via <code>driverId</code> / hybrid storage settings).
             </p>
             <div class="info-box">
                 <p><strong>What you need:</strong></p>
-                <p>• <strong>Driver name</strong> — required.</p>
-                <p>• <strong>Compute storage</strong> — loaded from the compute cluster <strong>storage-driver</strong> (or dataset) plugin, same as in the compute UI. If there is only one storage, it is chosen automatically; if there are several, pick one from the dropdown.</p>
-                <p>• <strong>Path on storage</strong> — optional folder on that storage; if empty, the service default path is used.</p>
-                <p>• <strong>Link Base URL</strong> belongs on the <strong>Execute</strong> step: it tells the workflow the serve-agent / gateway URL plus path inside storage so downloads land under the right directory. You do not set it on this page.</p>
+                <p>• <strong>Driver name</strong> — a unique name for this driver in the project (required).</p>
+                <p>• <strong>Compute storage</strong> — the list comes from this service’s resolved compute and its <strong>storage-driver</strong> (or dataset) plugin, same idea as in the platform compute UI. One storage → used automatically; several → choose in the dropdown (names may show a type such as NFS or S3).</p>
+                <p>• <strong>Path on storage</strong> — optional subfolder on that storage. If you leave it blank, the service applies its default folder for this flow.</p>
             </div>
         </div>
 
         <div class="card">
             <h2>Check existing HYBRID drivers</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 16px;">
-                Shows drivers whose <strong>project id</strong> on the record matches this panel’s project, and whose <strong>compute</strong> matches this service (same as storages). Drivers without a project id in the API are hidden unless you set <code>HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1</code>. For all HYBRID drivers in the project (all computes), set <code>HYBRID_DRIVERS_PROJECT_WIDE=1</code>.
+                Use <strong>Refresh</strong> to load HYBRID drivers for <strong>this project</strong>. By default the list is limited to drivers whose compute matches <strong>this service’s</strong> compute (same resolution as loading storages above), so you only see drivers that belong to this stress-test setup.
+            </p>
+            <p style="color: var(--text-secondary); font-size: 13px; margin-bottom: 16px;">
+                <strong>Optional environment overrides</strong> (service / deployment): <code>HYBRID_DRIVERS_PROJECT_WIDE=1</code> lists every HYBRID driver in the project (all computes). <code>HYBRID_DRIVERS_ALLOW_SDK_WITHOUT_PROJECT_ID=1</code> can include drivers that have no project id in the API if their id appears in the SDK list. Use these only when you understand the broader listing.
             </p>
             <button type="button" class="btn btn-secondary" onclick="loadHybridDrivers()">🔄 Refresh HYBRID drivers</button>
             <div id="hybridDriversList" style="margin-top: 16px;"></div>
@@ -119,7 +120,7 @@
         <div class="card">
             <h2>Create HYBRID driver</h2>
             <p style="color: var(--text-secondary); font-size: 14px; margin-bottom: 20px;">
-                Creates a HYBRID external storage driver via the service API.
+                Submits a create request through this panel’s API. The service resolves the compute (from your environment / service) and creates the HYBRID driver with the name, storage, and path you enter below.
             </p>
 
             <div id="hybridStatusMessage"></div>
